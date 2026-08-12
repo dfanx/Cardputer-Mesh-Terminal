@@ -1,0 +1,28 @@
+# Local agent state
+CLAUDE.local.md
+.claude/settings.local.json
+.claude/tmp/
+
+# Secrets
+.env
+.env.*
+!.env.example
+secrets/
+credentials/
+
+# Local noise
+*.log
+.DS_Store
+Thumbs.db
+
+# PlatformIO / build output
+.pio/
+.platformio/
+.venv/
+compile_commands.json
+dist/
+deploy/firmware-complete.bin
+.release-tools/
+
+# Runtime data copied to a device SD card
+data/tracks/

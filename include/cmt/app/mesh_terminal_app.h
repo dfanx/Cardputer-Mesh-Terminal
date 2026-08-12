@@ -1,0 +1,101 @@
+#pragma once
+
+#include "cmt/core/channel_plan.h"
+#include "cmt/core/fragmentation.h"
+#include "cmt/core/mesh_router.h"
+#include "cmt/core/message_codec.h"
+#include "cmt/core/sequence_tracker.h"
+#include "cmt/platform/audio_service.h"
+#include "cmt/platform/device_state.h"
+#include "cmt/platform/gnss_service.h"
+#include "cmt/platform/mbedtls_crypto.h"
+#include "cmt/platform/radio_service.h"
+#include "cmt/platform/storage_service.h"
+#include "cmt/platform/terminal_ui.h"
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace cmt {
+
+class MeshTerminalApp {
+ public:
+  void setup();
+  void loop();
+
+ private:
+  enum class Screen {
+    Pairing,
+    Home,
+    MessageMenu,
+    TextInput,
+    History,
+    Recording,
+    Notice,
+  };
+
+  struct PeerState {
+    std::uint32_t node_id = 0;
+    BeaconMessage beacon{};
+    std::uint32_t last_seen_ms = 0;
+    float rssi_dbm = 0.0F;
+  };
+
+  void handleInput(std::uint32_t now_ms);
+  void handlePairingInput();
+  void handleHomeInput(std::uint32_t now_ms, bool space_held);
+  void handleMenuInput();
+  void handleTextInput();
+  void handleHistoryInput();
+  void handleNoticeInput();
+  void handleRadio(std::uint32_t now_ms);
+  void handleDecodedMessage(const ReassemblyResult& result, float rssi_dbm,
+                            std::uint32_t now_ms);
+  void updateTrackAndBeacon(std::uint32_t now_ms);
+  void render(std::uint32_t now_ms, bool force = false);
+
+  bool joinGroup();
+  bool sendText(const std::string& text);
+  bool sendBeacon();
+  bool sendVoice(const std::vector<std::uint8_t>& encoded);
+  bool sendPayload(MessageType type, const std::vector<std::uint8_t>& payload);
+  PacketHeader makeBaseHeader(MessageType type);
+  void addHistory(const std::string& entry);
+  void showNotice(const std::string& title, const std::string& message,
+                  std::uint16_t color);
+  UiHomeModel buildHomeModel(std::uint32_t now_ms) const;
+
+  TerminalUi ui_;
+  DeviceState device_state_;
+  NonceGenerator nonce_generator_;
+  GnssService gnss_;
+  StorageService storage_;
+  RadioService radio_;
+  AudioService audio_;
+  MbedTlsCrypto crypto_;
+  MeshRouter router_;
+  Reassembler reassembler_;
+  SequenceTracker sequence_tracker_;
+
+  Screen screen_ = Screen::Pairing;
+  GroupProfile group_{};
+  std::string pin_;
+  std::string pairing_error_;
+  std::string text_input_;
+  std::vector<PeerState> peers_;
+  std::vector<std::string> history_;
+  std::size_t menu_selected_ = 0;
+  std::size_t peer_selected_ = 0;
+  std::size_t history_selected_ = 0;
+  std::string notice_title_;
+  std::string notice_message_;
+  std::uint16_t notice_color_ = 0;
+  bool paired_ = false;
+  bool dirty_ = true;
+  bool previous_space_held_ = false;
+  std::uint32_t last_render_ms_ = 0;
+  std::uint32_t next_beacon_ms_ = 0;
+};
+
+}  // namespace cmt
