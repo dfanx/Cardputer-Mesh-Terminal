@@ -120,7 +120,7 @@ void TerminalUi::renderUserId(const std::string& user_id, const char* error) {
   endFrame();
 }
 
-void TerminalUi::renderPairing(const std::string& masked_pin,
+void TerminalUi::renderPairing(const std::string& pin,
                                const char* error) {
   header("群組配對", kBlue);
   auto& display = gfx();
@@ -129,7 +129,7 @@ void TerminalUi::renderPairing(const std::string& masked_pin,
   display.drawRoundRect(48, 53, 144, 34, 4, kWhite);
   display.setTextSize(2);
   display.setCursor(78, 59);
-  display.print(masked_pin.c_str());
+  display.print(pin.c_str());
   display.setTextSize(1);
   display.setCursor(8, 96);
   display.setTextColor(kMuted, kBackground);

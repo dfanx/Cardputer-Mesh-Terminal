@@ -729,7 +729,7 @@ void MeshTerminalApp::render(const std::uint32_t now_ms, const bool force) {
       ui_.renderUserId(user_id_, user_id_error_.c_str());
       break;
     case Screen::Pairing:
-      ui_.renderPairing(std::string(pin_.size(), '*'), pairing_error_.c_str());
+      ui_.renderPairing(pin_, pairing_error_.c_str());
       break;
     case Screen::AntennaCheck:
       ui_.renderAntennaCheck(radio_.moduleDetected());

@@ -45,7 +45,9 @@ class TerminalUi {
   bool enableFrameBuffer();
   void renderBoot(const char* status);
   void renderUserId(const std::string& user_id, const char* error);
-  void renderPairing(const std::string& masked_pin, const char* error);
+  // PIN 以明碼顯示。4 位 PIN 的安全目標只有群組辨識與基本內容遮蔽，遮成 * 擋不住
+  // 任何實際威脅，卻讓使用者看不出自己按錯哪一位。
+  void renderPairing(const std::string& pin, const char* error);
   void renderAntennaCheck(bool module_detected);
   void renderHome(const UiHomeModel& model);
   void renderMessageMenu(const std::vector<std::string>& messages,
