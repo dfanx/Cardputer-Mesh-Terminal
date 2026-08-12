@@ -18,10 +18,30 @@ void writeU32(std::array<std::uint8_t, 12>& output, const std::size_t offset,
 
 }  // namespace
 
+bool isValidUserId(const std::string& user_id) {
+  if (user_id.empty() || user_id.size() > kMaxUserIdBytes) {
+    return false;
+  }
+  for (const char value : user_id) {
+    const bool allowed = (value >= 'A' && value <= 'Z') ||
+                         (value >= '0' && value <= '9') || value == '-' ||
+                         value == '_';
+    if (!allowed) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool DeviceState::begin() {
   Preferences preferences;
   if (!preferences.begin("cmt", false)) {
     return false;
+  }
+  const String stored_user_id = preferences.getString("uid", "");
+  user_id_.assign(stored_user_id.c_str());
+  if (!isValidUserId(user_id_)) {
+    user_id_.clear();
   }
   node_id_ = preferences.getUInt("node", 0);
   if (node_id_ == 0U || node_id_ == 0xFFFFFFFFUL) {
@@ -39,7 +59,25 @@ bool DeviceState::begin() {
 
 std::uint32_t DeviceState::nodeId() const { return node_id_; }
 
+std::string DeviceState::userId() const { return user_id_; }
+
+bool DeviceState::setUserId(const std::string& user_id) {
+  if (!isValidUserId(user_id)) {
+    return false;
+  }
+  user_id_ = user_id;
+  Preferences preferences;
+  if (preferences.begin("cmt", false)) {
+    preferences.putString("uid", user_id_.c_str());
+    preferences.end();
+  }
+  return true;
+}
+
 std::string DeviceState::callsign() const {
+  if (!user_id_.empty()) {
+    return user_id_;
+  }
   char value[9]{};
   std::snprintf(value, sizeof(value), "N%04lX",
                 static_cast<unsigned long>(node_id_ & 0xFFFFUL));

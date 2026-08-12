@@ -10,6 +10,7 @@ M5Stack Cardputer Adv + Cap LoRa-1262/GNSS 的山區離網文字、定位與短�
 - Test full: `.\tools\test-native.cmd`
 - Lint / static check: `.\tools\pio.cmd check -e cardputer-adv`
 - Build: `.\tools\pio.cmd run -e cardputer-adv`
+- Flash（從原始碼建置並燒錄，自動選 COM 埠）: `.\deploy\flash-dev.cmd`；可加 `-Port COM5`、`-EraseAll`、`-Monitor`
 
 ## Invariants
 
@@ -19,6 +20,7 @@ M5Stack Cardputer Adv + Cap LoRa-1262/GNSS 的山區離網文字、定位與短�
 - 4 位 PIN 的安全目標只限群組辨識、基本內容遮蔽與防止誤收；不得宣稱能抵抗竊聽者的離線暴力破解。
 - 預設射頻設定只適用台灣開發測試基線；頻率、功率與空中時間仍受當地法規及設備認證約束。
 - 韌體不得把 PIN、原始語音或精確位置輸出到 Serial 日誌。
+- 天線未經使用者確認前不得發射任何封包，含 Beacon 與 Mesh 中繼；閘門預設關閉、每次開機重置，且必須同時存在於 app 層與 `RadioService`。天線安裝狀態無法由硬體偵測，不得宣稱能自動判定。
 
 產品範圍見 `docs/PROJECT_BRIEF.md`；持久技術決策見 `docs/DECISIONS.md`。不要把這兩份文件匯入常駐 context。
 
@@ -34,6 +36,7 @@ M5Stack Cardputer Adv + Cap LoRa-1262/GNSS 的山區離網文字、定位與短�
 
 - Cardputer Adv 的 LoRa 天線開關必須透過 I2C `PI4IOE5V6408` P0 拉高，否則 SX1262 初始化成功也可能無 RF 路徑。
 - Cardputer Adv 的麥克風與喇叭共用音訊資源，錄放音切換前必須停止目前工作並切換 `M5.Mic` / `M5.Speaker`。
+- Windows 命令列上限 32767 字元。ESP32 Arduino framework 會帶入約 200 個 `-I`，核心目錄若放在長路徑下會讓編譯命令超限，症狀是 `xtensa-esp32s3-elf-g++: error: CreateProcess: No such file or directory`（不是工具鏈損毀）。`tools/pio.cmd` 因此改為：顯式 `PLATFORMIO_CORE_DIR` 優先，其次已存在的 repo-local `.platformio`，否則落回 `%USERPROFILE%\.platformio`。
 
 ## Compaction
 

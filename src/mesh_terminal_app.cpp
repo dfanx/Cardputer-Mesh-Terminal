@@ -26,24 +26,41 @@ bool hasWordCharacter(const Keyboard_Class::KeysState& keys, const char value) {
                    static_cast<char>(value - 'a' + 'A')) != keys.word.end();
 }
 
+// Cardputer 的方向鍵與 Esc 印在 ; . , / ` 這五顆鍵上，鍵盤驅動只有在 Fn 按下時
+// 才把它們當方向鍵，但 keys.word 兩種情況都會帶出原字元。沒有文字輸入的畫面直接
+// 接受單按，讓導覽不必用組合鍵；Fn + 同鍵仍然有效。
 bool isEscape(const Keyboard_Class::KeysState& keys) {
-  return keys.fn && hasWordCharacter(keys, '`');
+  return hasWordCharacter(keys, '`') || hasWordCharacter(keys, '~');
+}
+
+// 自由訊息輸入頁的 ` 是可打字的字元，那一頁只能認 Fn+Esc。
+bool isFnEscape(const Keyboard_Class::KeysState& keys) {
+  return keys.fn && isEscape(keys);
 }
 
 bool isUp(const Keyboard_Class::KeysState& keys) {
-  return keys.fn && hasWordCharacter(keys, ';');
+  return hasWordCharacter(keys, ';');
 }
 
 bool isDown(const Keyboard_Class::KeysState& keys) {
-  return keys.fn && hasWordCharacter(keys, '.');
+  return hasWordCharacter(keys, '.');
 }
 
 bool isLeft(const Keyboard_Class::KeysState& keys) {
-  return keys.fn && hasWordCharacter(keys, ',');
+  return hasWordCharacter(keys, ',');
 }
 
 bool isRight(const Keyboard_Class::KeysState& keys) {
-  return keys.fn && hasWordCharacter(keys, '/');
+  return hasWordCharacter(keys, '/');
+}
+
+// 實體鍵是 - 與 =；shift 後會變成 _ 與 +，兩種字元都收下，使用者不必在意 shift。
+bool isVolumeUp(const Keyboard_Class::KeysState& keys) {
+  return hasWordCharacter(keys, '=') || hasWordCharacter(keys, '+');
+}
+
+bool isVolumeDown(const Keyboard_Class::KeysState& keys) {
+  return hasWordCharacter(keys, '-') || hasWordCharacter(keys, '_');
 }
 
 std::string sequenceLabel(const PacketHeader& header) {
@@ -94,9 +111,14 @@ void MeshTerminalApp::setup() {
   storage_.begin();
   gnss_.begin();
   audio_.begin();
+  // 音訊之後才要畫面緩衝：記憶體不夠時寧可畫面閃爍，也不要犧牲 Codec2 語音。
+  ui_.enableFrameBuffer();
 
   delay(350);
-  screen_ = Screen::Pairing;
+  // 第一步先問「這台機器是誰」，代號會進 Beacon 的 callsign，隊友才分得出來源。
+  // 已設定過的代號直接帶入，回訪時按 Enter 就能過。
+  user_id_ = device_state_.userId();
+  screen_ = Screen::UserId;
   dirty_ = true;
   render(millis(), true);
 }
@@ -126,9 +148,9 @@ void MeshTerminalApp::handleInput(const std::uint32_t now_ms) {
       } else {
         showNotice("語音", "沒有可傳送的語音資料", kNoticeYellow);
       }
-    } else {
-      dirty_ = true;
     }
+    // 錄音中不設 dirty_：進度條交給 render() 的 100 ms 週期更新就夠，否則會在
+    // 每次主迴圈都重畫整頁，跟麥克風取樣搶 CPU。
     previous_space_held_ = space_held;
     return;
   }
@@ -140,8 +162,14 @@ void MeshTerminalApp::handleInput(const std::uint32_t now_ms) {
   }
 
   switch (screen_) {
+    case Screen::UserId:
+      handleUserIdInput();
+      break;
     case Screen::Pairing:
       handlePairingInput();
+      break;
+    case Screen::AntennaCheck:
+      handleAntennaCheckInput(now_ms);
       break;
     case Screen::Home:
       handleHomeInput(now_ms, space_held);
@@ -164,8 +192,49 @@ void MeshTerminalApp::handleInput(const std::uint32_t now_ms) {
   previous_space_held_ = space_held;
 }
 
+void MeshTerminalApp::handleUserIdInput() {
+  auto& keys = M5Cardputer.Keyboard.keysState();
+  for (const char value : keys.word) {
+    if (user_id_.size() >= kMaxUserIdBytes) {
+      break;
+    }
+    // 一律存大寫，鍵盤是否按著 shift 都得到同一個代號。
+    const char upper = (value >= 'a' && value <= 'z')
+                           ? static_cast<char>(value - 'a' + 'A')
+                           : value;
+    if ((upper >= 'A' && upper <= 'Z') || (upper >= '0' && upper <= '9') ||
+        upper == '-' || upper == '_') {
+      user_id_.push_back(upper);
+      user_id_error_.clear();
+      dirty_ = true;
+    }
+  }
+  if (keys.del && !user_id_.empty()) {
+    user_id_.pop_back();
+    user_id_error_.clear();
+    dirty_ = true;
+  }
+  if (keys.enter) {
+    if (device_state_.setUserId(user_id_)) {
+      user_id_error_.clear();
+      screen_ = Screen::Pairing;
+    } else {
+      user_id_error_ = "代號需 1-8 個大寫英數字元";
+    }
+    dirty_ = true;
+  }
+}
+
 void MeshTerminalApp::handlePairingInput() {
   auto& keys = M5Cardputer.Keyboard.keysState();
+  if (isEscape(keys)) {
+    // 配對前都還沒發射，退回去改代號是安全的。
+    pin_.clear();
+    pairing_error_.clear();
+    screen_ = Screen::UserId;
+    dirty_ = true;
+    return;
+  }
   for (const char value : keys.word) {
     if (value >= '0' && value <= '9' && pin_.size() < 4U) {
       pin_.push_back(value);
@@ -180,37 +249,62 @@ void MeshTerminalApp::handlePairingInput() {
   }
   if (keys.enter) {
     if (joinGroup()) {
-      screen_ = Screen::Home;
-      dirty_ = true;
-      next_beacon_ms_ = millis() + 10000UL;
-    } else {
-      dirty_ = true;
+      // 先過天線確認，確認前不排 Beacon，否則會在無天線狀態下自動發射。
+      screen_ = Screen::AntennaCheck;
     }
+    dirty_ = true;
+  }
+}
+
+void MeshTerminalApp::setAntennaConfirmed(const bool confirmed,
+                                          const std::uint32_t now_ms) {
+  antenna_confirmed_ = confirmed;
+  radio_.setTransmitInhibited(!confirmed);
+  if (confirmed) {
+    next_beacon_ms_ = now_ms + 10000UL;
+    addHistory("[系統] 已確認天線，發射啟用");
+  } else {
+    next_beacon_ms_ = 0U;
+    addHistory("[系統] 未確認天線，僅接收不發射");
+  }
+  dirty_ = true;
+}
+
+void MeshTerminalApp::handleAntennaCheckInput(const std::uint32_t now_ms) {
+  auto& keys = M5Cardputer.Keyboard.keysState();
+  if (hasWordCharacter(keys, 'y')) {
+    setAntennaConfirmed(true, now_ms);
+    screen_ = Screen::Home;
+    return;
+  }
+  if (hasWordCharacter(keys, 'n') || isEscape(keys)) {
+    setAntennaConfirmed(false, now_ms);
+    screen_ = Screen::Home;
   }
 }
 
 void MeshTerminalApp::handleHomeInput(const std::uint32_t now_ms,
                                       const bool space_held) {
   auto& keys = M5Cardputer.Keyboard.keysState();
-  if (hasWordCharacter(keys, '+')) {
+  if (isVolumeUp(keys)) {
     audio_.adjustVolume(10);
     dirty_ = true;
     return;
   }
-  if (hasWordCharacter(keys, '-')) {
+  if (isVolumeDown(keys)) {
     audio_.adjustVolume(-10);
     dirty_ = true;
     return;
   }
-  if (hasWordCharacter(keys, 't')) {
-    text_input_.clear();
-    screen_ = Screen::TextInput;
+  if (hasWordCharacter(keys, 'a')) {
+    // 裝上或拆下天線後可隨時重新確認，不必重開機。
+    screen_ = Screen::AntennaCheck;
     dirty_ = true;
     return;
   }
-  if (hasWordCharacter(keys, 'm')) {
+  if (hasWordCharacter(keys, 't')) {
     screen_ = Screen::MessageMenu;
-    menu_selected_ = 0U;
+    menu_selected_ = 0;
     dirty_ = true;
     return;
   }
@@ -230,7 +324,10 @@ void MeshTerminalApp::handleHomeInput(const std::uint32_t now_ms,
     dirty_ = true;
   }
   if (space_held && !previous_space_held_) {
-    if (!audio_.available()) {
+    if (!antenna_confirmed_) {
+      showNotice("發射已停用", "未確認天線，按 A 確認後才能發送語音",
+                 kNoticeRed);
+    } else if (!audio_.available()) {
       showNotice("語音不可用", "Codec2 或音訊初始化失敗", kNoticeYellow);
     } else if (audio_.startRecording(now_ms)) {
       screen_ = Screen::Recording;
@@ -239,6 +336,14 @@ void MeshTerminalApp::handleHomeInput(const std::uint32_t now_ms,
       showNotice("語音", "音訊裝置目前不可用", kNoticeRed);
     }
   }
+}
+
+bool MeshTerminalApp::blockedByAntenna() {
+  if (antenna_confirmed_) {
+    return false;
+  }
+  showNotice("發射已停用", "未確認天線，按 A 確認後才能發送", kNoticeRed);
+  return true;
 }
 
 void MeshTerminalApp::handleMenuInput() {
@@ -262,6 +367,9 @@ void MeshTerminalApp::handleMenuInput() {
     if (value >= '1' && value <= '9') {
       const std::size_t index = static_cast<std::size_t>(value - '1');
       if (index < messages.size()) {
+        if (blockedByAntenna()) {
+          return;
+        }
         if (sendText(messages[index])) {
           showNotice("訊息", "罐頭訊息已排入傳送", kNoticeGreen);
         } else {
@@ -273,6 +381,9 @@ void MeshTerminalApp::handleMenuInput() {
   }
   if (keys.enter) {
     if (menu_selected_ < messages.size()) {
+      if (blockedByAntenna()) {
+        return;
+      }
       if (sendText(messages[menu_selected_])) {
         showNotice("訊息", "罐頭訊息已排入傳送", kNoticeGreen);
       } else {
@@ -288,8 +399,8 @@ void MeshTerminalApp::handleMenuInput() {
 
 void MeshTerminalApp::handleTextInput() {
   auto& keys = M5Cardputer.Keyboard.keysState();
-  if (isEscape(keys)) {
-    screen_ = Screen::Home;
+  if (isFnEscape(keys)) {
+    screen_ = Screen::MessageMenu;
     dirty_ = true;
     return;
   }
@@ -304,6 +415,9 @@ void MeshTerminalApp::handleTextInput() {
     }
   }
   if (keys.enter && !text_input_.empty()) {
+    if (blockedByAntenna()) {
+      return;
+    }
     if (sendText(text_input_)) {
       showNotice("訊息", "自由訊息已排入傳送", kNoticeGreen);
     } else {
@@ -372,7 +486,9 @@ PacketHeader MeshTerminalApp::makeBaseHeader(const MessageType type) {
 
 bool MeshTerminalApp::sendPayload(const MessageType type,
                                   const std::vector<std::uint8_t>& payload) {
-  if (!paired_ || !radio_.ready() || !crypto_.ready()) {
+  // 天線未確認時完全不做封裝與排隊。RadioService 也會再擋一次，這裡先擋是為了
+  // 不白做 AES-GCM 與分片，也不消耗 message_id / sequence。
+  if (!paired_ || !antenna_confirmed_ || !radio_.ready() || !crypto_.ready()) {
     return false;
   }
   const PacketHeader base = makeBaseHeader(type);
@@ -444,7 +560,8 @@ void MeshTerminalApp::handleRadio(const std::uint32_t now_ms) {
     if (route.duplicate || !route.deliver) {
       continue;
     }
-    if (route.relay) {
+    // 中繼同樣是發射行為，天線未確認時只收不轉。
+    if (route.relay && antenna_confirmed_) {
       PacketHeader relay_header = route.relay_header;
       relay_header.nonce = nonce_generator_.next();
       std::vector<std::uint8_t> relay_wire;
@@ -530,7 +647,7 @@ void MeshTerminalApp::updateTrackAndBeacon(const std::uint32_t now_ms) {
   if (storage_.maybeAppendTrack(fix.point, fix.day_key, fix.unix_time, now_ms)) {
     dirty_ = true;
   }
-  if (next_beacon_ms_ != 0U &&
+  if (antenna_confirmed_ && next_beacon_ms_ != 0U &&
       static_cast<std::int32_t>(now_ms - next_beacon_ms_) >= 0) {
     if (sendBeacon()) {
       next_beacon_ms_ = now_ms + kBeaconIntervalMs;
@@ -574,6 +691,7 @@ UiHomeModel MeshTerminalApp::buildHomeModel(
   model.own_position = gnss_.snapshot().point;
   model.track = storage_.track();
   model.tx_queued = radio_.queuedCount();
+  model.tx_inhibited = radio_.transmitInhibited();
   model.selected_peer = peer_selected_;
   model.peers.reserve(peers_.size());
   for (const auto& peer : peers_) {
@@ -590,20 +708,31 @@ UiHomeModel MeshTerminalApp::buildHomeModel(
 }
 
 void MeshTerminalApp::render(const std::uint32_t now_ms, const bool force) {
-  const std::uint32_t interval =
-      screen_ == Screen::Recording ? 100UL : 500UL;
-  if (!force && !dirty_ && now_ms - last_render_ms_ < interval) {
+  // 週期重畫只負責更新會自己變動的欄位（電量、隊友時效、佇列、錄音進度）。
+  // 其餘更新一律由 dirty_ 觸發，並限制在 kMinRenderIntervalMs 以上，避免主迴圈
+  // 每 2 ms 就重畫一次整頁。畫面本身由 TerminalUi 的離螢幕緩衝推送，不會閃爍。
+  constexpr std::uint32_t kMinRenderIntervalMs = 50;
+  const std::uint32_t periodic_interval =
+      screen_ == Screen::Recording ? 100UL : 1000UL;
+  const std::uint32_t elapsed = now_ms - last_render_ms_;
+  if (!force && elapsed < kMinRenderIntervalMs) {
     return;
   }
-  if (!force && screen_ == Screen::Home && now_ms - last_render_ms_ < interval) {
+  if (!force && !dirty_ && elapsed < periodic_interval) {
     return;
   }
   last_render_ms_ = now_ms;
   dirty_ = false;
 
   switch (screen_) {
+    case Screen::UserId:
+      ui_.renderUserId(user_id_, user_id_error_.c_str());
+      break;
     case Screen::Pairing:
       ui_.renderPairing(std::string(pin_.size(), '*'), pairing_error_.c_str());
+      break;
+    case Screen::AntennaCheck:
+      ui_.renderAntennaCheck(radio_.moduleDetected());
       break;
     case Screen::Home:
       ui_.renderHome(buildHomeModel(now_ms));

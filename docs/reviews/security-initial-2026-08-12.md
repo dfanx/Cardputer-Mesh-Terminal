@@ -30,7 +30,7 @@
 ## Verification evidence
 
 - `tools/test-native.cmd`：9 tests、0 failures，包含壞 header、越界訊息、竄改 tag、分片 timeout、TTL、duplicate，以及語音 schema/三秒界線。
-- `tools/pio.cmd run -e cardputer-adv`：啟用 Codec2、音量控制與獨立文字/罐頭入口的 clean build 成功；RAM 靜態配置 24,628 / 327,680 bytes（7.5%），Flash 1,057,281 / 3,342,336 bytes（31.6%）。錄音/播放共用約 48 KB 動態 PCM buffer，此數字不包含在靜態 RAM 報表，仍需實機觀察 heap 最低水位。
+- `tools/pio.cmd run -e cardputer-adv`：啟用 Codec2 與音量控制的 clean build 成功；RAM 靜態配置 24,628 / 327,680 bytes（7.5%），Flash 1,057,265 / 3,342,336 bytes（31.6%）。錄音/播放共用約 48 KB 動態 PCM buffer，此數字不包含在靜態 RAM 報表，仍需實機觀察 heap 最低水位。
 - `tools/pio.cmd check -e cardputer-adv --skip-packages`：cppcheck 通過；本專案程式 0 high / 0 medium，low 項為 style/whole-program unused 誤判。總表的 148 medium / 386 low 來自 TinyGPSPlus/M5 等第三方 headers，不視為本專案已修復。
 
 ## Residual risk

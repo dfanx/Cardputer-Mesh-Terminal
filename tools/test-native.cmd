@@ -9,8 +9,18 @@ if not exist "%VSWHERE%" (
 )
 
 for /f "usebackq tokens=*" %%I in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSROOT=%%I"
+rem Some installs do not register the VC.Tools.x86.x64 component id even though
+rem MSVC is present. Fall back to the latest install and treat the presence of
+rem vcvars64.bat as the real test.
 if not defined VSROOT (
-  echo MSVC C++ toolchain not found.
+  for /f "usebackq tokens=*" %%I in (`"%VSWHERE%" -latest -products * -property installationPath`) do set "VSROOT=%%I"
+)
+if not defined VSROOT (
+  echo Visual Studio installation not found.
+  exit /b 2
+)
+if not exist "%VSROOT%\VC\Auxiliary\Build\vcvars64.bat" (
+  echo MSVC C++ toolchain not found in "%VSROOT%".
   exit /b 2
 )
 

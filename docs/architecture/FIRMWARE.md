@@ -18,8 +18,6 @@ Cardputer Adv adapters: M5Cardputer/M5Unified, RadioLib SX1262,
 
 核心層不得 include Arduino/M5/RadioLib，讓封包邏輯可用 native tests 驗證。平台層只負責資源生命週期、驅動錯誤與事件轉換；產品狀態由 `MeshTerminalApp` 統一協調。
 
-主畫面輸入映射：`T` 直接進入英數自由輸入；`M` 進入罐頭訊息選單；`Space` 是三秒 PTT；`+`／`-` 調整播放音量。自由輸入與罐頭選單是兩個獨立 UI state，避免使用者為了打字先穿過快捷選單。
-
 ## Wire format
 
 所有整數使用 big-endian。Header 是 AES-GCM AAD；payload 加密，tag 為 16 bytes。

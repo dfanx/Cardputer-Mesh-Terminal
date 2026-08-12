@@ -26,7 +26,9 @@ class MeshTerminalApp {
 
  private:
   enum class Screen {
+    UserId,
     Pairing,
+    AntennaCheck,
     Home,
     MessageMenu,
     TextInput,
@@ -43,7 +45,13 @@ class MeshTerminalApp {
   };
 
   void handleInput(std::uint32_t now_ms);
+  void handleUserIdInput();
   void handlePairingInput();
+  void handleAntennaCheckInput(std::uint32_t now_ms);
+  // 單一權威開關：同時更新應用層旗標與 RadioService 的發射閘。
+  void setAntennaConfirmed(bool confirmed, std::uint32_t now_ms);
+  // 未確認天線時顯示明確原因並回傳 true，讓呼叫端停止送出。
+  bool blockedByAntenna();
   void handleHomeInput(std::uint32_t now_ms, bool space_held);
   void handleMenuInput();
   void handleTextInput();
@@ -78,8 +86,10 @@ class MeshTerminalApp {
   Reassembler reassembler_;
   SequenceTracker sequence_tracker_;
 
-  Screen screen_ = Screen::Pairing;
+  Screen screen_ = Screen::UserId;
   GroupProfile group_{};
+  std::string user_id_;
+  std::string user_id_error_;
   std::string pin_;
   std::string pairing_error_;
   std::string text_input_;
@@ -92,6 +102,8 @@ class MeshTerminalApp {
   std::string notice_message_;
   std::uint16_t notice_color_ = 0;
   bool paired_ = false;
+  // 天線無法用硬體偵測，只能由使用者每次開機確認。預設 false = 禁止發射。
+  bool antenna_confirmed_ = false;
   bool dirty_ = true;
   bool previous_space_held_ = false;
   std::uint32_t last_render_ms_ = 0;

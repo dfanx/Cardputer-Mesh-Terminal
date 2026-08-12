@@ -42,6 +42,7 @@ class RadioService::Impl {
 
   bool begin(const GroupProfile& profile) {
     ready_ = false;
+    module_detected_ = false;
     last_error_ = RADIOLIB_ERR_NONE;
 
     if (!m5::In_I2C.begin()) {
@@ -63,6 +64,7 @@ class RadioService::Impl {
     if (last_error_ != RADIOLIB_ERR_NONE) {
       return false;
     }
+    module_detected_ = true;
     last_error_ = radio_.setCurrentLimit(140.0F);
     if (last_error_ != RADIOLIB_ERR_NONE) {
       return false;
@@ -88,14 +90,15 @@ class RadioService::Impl {
       }
     }
 
-    if (mode_ == Mode::Receive && !tx_queue_.empty() &&
+    if (mode_ == Mode::Receive && !tx_inhibited_ && !tx_queue_.empty() &&
         static_cast<std::int32_t>(now_ms - next_tx_at_ms_) >= 0) {
       tryStartTransmit(now_ms);
     }
   }
 
   bool queueTransmit(const std::vector<std::uint8_t>& bytes) {
-    if (!ready_ || bytes.empty() || bytes.size() > kMaxRadioPacketBytes ||
+    if (!ready_ || tx_inhibited_ || bytes.empty() ||
+        bytes.size() > kMaxRadioPacketBytes ||
         tx_queue_.size() >= kMaxTxQueue) {
       return false;
     }
@@ -105,7 +108,7 @@ class RadioService::Impl {
 
   bool queueTransmitBatch(
       const std::vector<std::vector<std::uint8_t>>& packets) {
-    if (!ready_ || packets.empty() ||
+    if (!ready_ || tx_inhibited_ || packets.empty() ||
         packets.size() > kMaxTxQueue - tx_queue_.size()) {
       return false;
     }
@@ -134,6 +137,20 @@ class RadioService::Impl {
   std::size_t queuedCount() const {
     return tx_queue_.size() + (active_tx_.empty() ? 0U : 1U);
   }
+  bool moduleDetected() const { return module_detected_; }
+
+  void setTransmitInhibited(const bool inhibited) {
+    if (inhibited == tx_inhibited_) {
+      return;
+    }
+    tx_inhibited_ = inhibited;
+    if (inhibited) {
+      // 已排隊但尚未上空的封包直接丟棄，避免天線狀態改變後才突然補發。
+      // 進行中的那一包不中止：它已經在輻射，中途拉掉 PA 沒有比較安全。
+      tx_queue_.clear();
+    }
+  }
+  bool transmitInhibited() const { return tx_inhibited_; }
 
  private:
   enum class Mode { Receive, Transmit };
@@ -205,6 +222,9 @@ class RadioService::Impl {
   m5::PI4IOE5V6408_Class ioe_;
   volatile bool irq_ = false;
   bool ready_ = false;
+  bool module_detected_ = false;
+  // Fail-safe 預設：在使用者確認天線已安裝之前一律禁止發射。
+  bool tx_inhibited_ = true;
   Mode mode_ = Mode::Receive;
   int last_error_ = RADIOLIB_ERR_NONE;
   std::uint32_t next_tx_at_ms_ = 0;
@@ -236,5 +256,12 @@ bool RadioService::pollReceived(RadioRxPacket& packet) {
 bool RadioService::ready() const { return impl_->ready(); }
 int RadioService::lastError() const { return impl_->lastError(); }
 std::size_t RadioService::queuedCount() const { return impl_->queuedCount(); }
+bool RadioService::moduleDetected() const { return impl_->moduleDetected(); }
+void RadioService::setTransmitInhibited(const bool inhibited) {
+  impl_->setTransmitInhibited(inhibited);
+}
+bool RadioService::transmitInhibited() const {
+  return impl_->transmitInhibited();
+}
 
 }  // namespace cmt

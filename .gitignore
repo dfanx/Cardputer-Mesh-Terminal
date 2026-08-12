@@ -26,3 +26,6 @@ deploy/firmware-complete.bin
 
 # Runtime data copied to a device SD card
 data/tracks/
+
+# Windows shortcut created locally for flashing
+*.lnk
