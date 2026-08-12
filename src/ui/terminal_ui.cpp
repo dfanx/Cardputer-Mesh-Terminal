@@ -166,7 +166,7 @@ void TerminalUi::renderHome(const UiHomeModel& model) {
   display.fillRect(0, 115, display.width(), 20, kPanel);
   display.setTextColor(kWhite, kPanel);
   display.setCursor(3, 118);
-  display.print("T訊息  -/+音量  Space語音");
+  display.print("T文字 M罐頭 -/+音量 Space語音");
 }
 
 void TerminalUi::renderMessageMenu(

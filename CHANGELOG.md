@@ -11,6 +11,7 @@
 - GNSS Beacon、SD 軌跡、螢幕軌跡圖、隊友相對距離/方位/高差與漏訊提示。
 - 預設啟用 3 秒 Space PTT、Codec2 1300 壓縮、版本化語音 schema、分片發送、完整重組與自動播放。
 - 主畫面 `+`／`-` 喇叭音量控制，0–100%、每次 10%、預設 50%。
+- 修正文字操作映射：`T` 直接進入英數自由輸入，`M` 開啟罐頭訊息選單。
 - Native core regression tests 與 Cardputer Adv build workflow。
 
 ### Known limitations

@@ -203,8 +203,14 @@ void MeshTerminalApp::handleHomeInput(const std::uint32_t now_ms,
     return;
   }
   if (hasWordCharacter(keys, 't')) {
+    text_input_.clear();
+    screen_ = Screen::TextInput;
+    dirty_ = true;
+    return;
+  }
+  if (hasWordCharacter(keys, 'm')) {
     screen_ = Screen::MessageMenu;
-    menu_selected_ = 0;
+    menu_selected_ = 0U;
     dirty_ = true;
     return;
   }
@@ -283,7 +289,7 @@ void MeshTerminalApp::handleMenuInput() {
 void MeshTerminalApp::handleTextInput() {
   auto& keys = M5Cardputer.Keyboard.keysState();
   if (isEscape(keys)) {
-    screen_ = Screen::MessageMenu;
+    screen_ = Screen::Home;
     dirty_ = true;
     return;
   }
