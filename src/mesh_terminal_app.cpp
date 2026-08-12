@@ -142,13 +142,18 @@ void MeshTerminalApp::handleInput(const std::uint32_t now_ms) {
   const bool space_held = M5Cardputer.Keyboard.isKeyPressed(' ');
   if (screen_ == Screen::Recording) {
     if (audio_.updateRecording(space_held, now_ms)) {
+      // 錄音失敗與發送失敗是完全不同的問題，訊息必須分開：合成一則會讓使用者
+      // 誤以為是自己按太短，實際上錄音好好的、被發射前置條件擋下。
       std::vector<std::uint8_t> encoded;
-      if (audio_.takeEncoded(encoded) && sendVoice(encoded)) {
+      if (!audio_.takeEncoded(encoded)) {
+        showNotice("語音", "錄音過短，請按住 Space 說完再放開", kNoticeYellow);
+      } else if (sendVoice(encoded)) {
         showNotice("語音", "語音已排入傳送", kNoticeGreen);
       } else {
-        // 一幀都沒錄到，實務上幾乎都是按一下就放開：startRecording() 的提示音
-        // 會先擋掉約 200 ms，太短的按壓結束時連 40 ms 的第一幀都湊不滿。
-        showNotice("語音", "錄音過短，請按住 Space 說完再放開", kNoticeYellow);
+        const char* reason = txBlockReason();
+        showNotice("語音無法發送",
+                   reason != nullptr ? reason : "發送佇列已滿，稍後再試",
+                   kNoticeRed);
       }
     }
     // 錄音中不設 dirty_：進度條交給 render() 的 100 ms 週期更新就夠，否則會在
@@ -510,6 +515,26 @@ bool MeshTerminalApp::sendPayload(const MessageType type,
     packets.push_back(std::move(wire));
   }
   return radio_.queueTransmitBatch(packets);
+}
+
+const char* MeshTerminalApp::txBlockReason() const {
+  // 順序與 sendPayload() 的前置檢查一致。
+  if (!paired_) {
+    return "尚未加入群組";
+  }
+  if (!antenna_confirmed_) {
+    return "未確認天線，按 A 確認";
+  }
+  if (!radio_.ready()) {
+    return "LoRa 模組未就緒";
+  }
+  if (!crypto_.ready()) {
+    return "群組金鑰未就緒";
+  }
+  if (radio_.transmitInhibited()) {
+    return "發射閘門仍關閉";
+  }
+  return nullptr;
 }
 
 bool MeshTerminalApp::sendText(const std::string& text) {

@@ -68,6 +68,10 @@ class MeshTerminalApp {
   bool sendBeacon();
   bool sendVoice(const std::vector<std::uint8_t>& encoded);
   bool sendPayload(MessageType type, const std::vector<std::uint8_t>& payload);
+
+  // sendPayload() 失敗時是哪一道閘門擋的，可直接顯示給使用者；沒有任何閘門
+  // 成立時回傳 nullptr（代表失敗發生在封裝或佇列，不是前置條件）。
+  const char* txBlockReason() const;
   PacketHeader makeBaseHeader(MessageType type);
   void addHistory(const std::string& entry);
   void showNotice(const std::string& title, const std::string& message,
