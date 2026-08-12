@@ -47,10 +47,21 @@
 ## ADR-005 — 預設納入三秒 Codec2 1300 PTT
 
 - **Date**：2026-08-12
-- **Status**：accepted
+- **Status**：superseded by ADR-006
 - **Context / constraints**：語音先前只有 adapter，預設 build 未綁定 codec；產品要求把語音實際做進韌體，同時限制為三秒並避免影響文字主流程。
 - **Options considered**：不壓縮 PCM/ADPCM；Codec2 3200；Codec2 1300；保留未啟用 adapter。
 - **Decision**：固定 `sh123/esp32_codec2@1.0.7`，只編入 Codec2 1300 mode、8 kHz mono。最多 75 個 40 ms frame；8-byte 版本化 metadata 加約 525-byte codec data，語音 TTL=1，完整重組與 schema 驗證後才播放。
 - **Rationale**：原始 PCM/ADPCM 的空中資料量不適合目前 LoRa profile；1300 mode 可將三秒控制在約三個 LoRa 封包，且現有 ESP32 Arduino package 能重現建置。
 - **Consequences**：這是錄完再傳，不是即時全雙工；音質、編解碼延遲、約五秒級理論空中時間及丟片體驗需實機驗證。套件標示 GPL-3.0，散布 binary 前需完成授權合規。
 - **Revisit trigger**：實機可懂度不足、空中時間不符法規/操作需求，或產品不能接受 GPL 散布義務。
+
+## ADR-006 — 語音改為單封包 Codec2 700C
+
+- **Date**：2026-08-12
+- **Status**：accepted
+- **Context / constraints**：ADR-005 的 1300 mode 三秒約 525 bytes，跨三個 fragment。以現行 SF9/BW125/CR4/7 估算，光是送出就要約 4.2 s 空中時間，比錄音本身還久；語音 TTL=1 且無 ACK/重傳，三片全到才可播放，單包到達率 0.85 時整段只剩約 0.61。產品需求是對講機等級可懂度，不是高傳真。
+- **Options considered**：維持 1300 三秒三片；1300 縮短到單片（約 1.2 s，太短）；700C 三秒兩片；700C 壓到單片；450 三秒單片。
+- **Decision**：改用 Codec2 700C（28 bits/frame、40 ms、8 kHz），錄音上限由 fragment 預算反推為 55 幀 = 2.2 s。wire format 升到 v2：3-byte header（version、codec、frame_count）加跨幀位元打包的 193 bytes，合計 196 bytes，保證單一 fragment。`kMaxVoiceFrames` 於 `message_codec.h` 由 `kMaxFragmentPayloadBytes` 推導並以 static_assert 鎖住。
+- **Rationale**：700C 是 FreeDV 700D 使用的位元率，屬「吵雜環境仍可辨識」的設計點；450 雖能塞進三秒，但 newamp2 的音高量化誤差對中文聲調傷害明顯，不值得為省 90 bytes 賭可懂度。位元打包是必要的：700C 每幀 28 bits 若沿用位元組對齊會浪費 14%。移除可由 codec id 推得的 metadata 欄位，換得多一幀並減少受攻擊者控制的輸入。
+- **Consequences**：單段語音從 3 s 縮短為 2.2 s，且與 v1 不相容（codec id、版本、打包方式全變）；混版部署會互相判為格式錯誤而捨棄。音質低於 1300 mode，中文可懂度必須實機驗證。仍是錄完再傳，不是即時全雙工。GPL-3.0 散布義務不變。
+- **Revisit trigger**：實機中文可懂度不足（則往 1300 單片 1.2 s 或雙片評估）；改用其他 SF/BW 使 airtime 不再是瓶頸；或加入 FEC/ARQ 後多片成本可接受。

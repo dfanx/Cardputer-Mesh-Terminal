@@ -302,38 +302,94 @@ void test_beacon_text_and_geo_round_trip() {
   TEST_ASSERT_EQUAL_STRING("E", relative.direction);
 }
 
-void test_voice_message_round_trip_and_limits() {
-  cmt::VoiceMessage voice{};
-  voice.frames.resize(cmt::kMaxVoiceFrames * cmt::kVoiceBytesPerFrame);
-  for (std::size_t index = 0; index < voice.frames.size(); ++index) {
-    voice.frames[index] = static_cast<std::uint8_t>(index);
+// 模擬 codec2_encode() 的輸出：位元組對齊，每幀只有前 kVoiceBitsPerFrame 個
+// 位元有效，其餘 padding 為零。
+std::vector<std::uint8_t> makeVoiceFrames(const std::size_t frame_count) {
+  std::vector<std::uint8_t> frames(frame_count * cmt::kVoiceCodedBytesPerFrame);
+  for (std::size_t index = 0; index < frames.size(); ++index) {
+    frames[index] = static_cast<std::uint8_t>(index * 7U + 1U);
   }
+  const unsigned used_in_last_byte = cmt::kVoiceBitsPerFrame % 8U;
+  if (used_in_last_byte != 0U) {
+    const auto mask =
+        static_cast<std::uint8_t>(0xFFU << (8U - used_in_last_byte));
+    for (std::size_t frame = 0; frame < frame_count; ++frame) {
+      frames[frame * cmt::kVoiceCodedBytesPerFrame +
+             cmt::kVoiceCodedBytesPerFrame - 1U] &= mask;
+    }
+  }
+  return frames;
+}
+
+void test_voice_message_round_trip_and_limits() {
+  // 幀預算由 fragment 上限反推，最長一段語音必須剛好塞進單一封包。
+  TEST_ASSERT_EQUAL_UINT8(55, cmt::kMaxVoiceFrames);
+  TEST_ASSERT_EQUAL_UINT32(2200, cmt::kMaxVoiceDurationMs);
+
+  cmt::VoiceMessage voice{};
+  voice.frames = makeVoiceFrames(cmt::kMaxVoiceFrames);
 
   std::vector<std::uint8_t> encoded;
   TEST_ASSERT_TRUE(cmt::encodeVoiceMessage(voice, encoded));
-  TEST_ASSERT_EQUAL_UINT(8U + voice.frames.size(), encoded.size());
+  TEST_ASSERT_EQUAL_UINT(
+      cmt::kVoiceHeaderBytes + cmt::packedVoiceBytes(cmt::kMaxVoiceFrames),
+      encoded.size());
+  TEST_ASSERT_EQUAL_UINT(196, encoded.size());
+  // 位元打包必須真的比直接送 codec2 的位元組對齊輸出小。
+  TEST_ASSERT_LESS_THAN_UINT(cmt::kVoiceHeaderBytes + voice.frames.size(),
+                             encoded.size());
+
+  auto header = makeHeader();
+  std::vector<cmt::PlainFragment> fragments;
+  TEST_ASSERT_TRUE(cmt::fragmentMessage(header, encoded, fragments));
+  TEST_ASSERT_EQUAL_UINT(1, fragments.size());
 
   cmt::VoiceMessage decoded{};
   TEST_ASSERT_TRUE(cmt::decodeVoiceMessage(encoded, decoded));
-  TEST_ASSERT_EQUAL_INT(static_cast<int>(cmt::VoiceCodec::Codec2_1300),
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(cmt::VoiceCodec::Codec2_700C),
                         static_cast<int>(decoded.codec));
-  TEST_ASSERT_EQUAL_UINT16(cmt::kVoiceSampleRateHz,
-                           decoded.sample_rate_hz);
-  TEST_ASSERT_EQUAL_UINT16(cmt::kVoiceSamplesPerFrame,
-                           decoded.samples_per_frame);
-  TEST_ASSERT_EQUAL_UINT8(cmt::kVoiceBytesPerFrame,
-                          decoded.bytes_per_frame);
+  TEST_ASSERT_EQUAL_UINT(voice.frames.size(), decoded.frames.size());
   TEST_ASSERT_EQUAL_UINT8_ARRAY(voice.frames.data(), decoded.frames.data(),
                                 voice.frames.size());
 
+  // 幀數不是 8 的倍數時，位元流不會落在位元組邊界上。
+  for (const std::size_t frame_count : {1U, 3U, 7U, 54U}) {
+    cmt::VoiceMessage odd{};
+    odd.frames = makeVoiceFrames(frame_count);
+    std::vector<std::uint8_t> odd_encoded;
+    TEST_ASSERT_TRUE(cmt::encodeVoiceMessage(odd, odd_encoded));
+    TEST_ASSERT_EQUAL_UINT(
+        cmt::kVoiceHeaderBytes + cmt::packedVoiceBytes(frame_count),
+        odd_encoded.size());
+    cmt::VoiceMessage odd_decoded{};
+    TEST_ASSERT_TRUE(cmt::decodeVoiceMessage(odd_encoded, odd_decoded));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(odd.frames.data(), odd_decoded.frames.data(),
+                                  odd.frames.size());
+  }
+
   auto malformed = encoded;
-  malformed[7] = static_cast<std::uint8_t>(cmt::kMaxVoiceFrames - 1U);
+  malformed[2] = static_cast<std::uint8_t>(cmt::kMaxVoiceFrames - 1U);
   TEST_ASSERT_FALSE(cmt::decodeVoiceMessage(malformed, decoded));
   malformed = encoded;
-  malformed[0] = 2U;
+  malformed[2] = static_cast<std::uint8_t>(cmt::kMaxVoiceFrames + 1U);
+  TEST_ASSERT_FALSE(cmt::decodeVoiceMessage(malformed, decoded));
+  malformed = encoded;
+  malformed[2] = 0U;
+  TEST_ASSERT_FALSE(cmt::decodeVoiceMessage(malformed, decoded));
+  malformed = encoded;
+  malformed[0] = 1U;
+  TEST_ASSERT_FALSE(cmt::decodeVoiceMessage(malformed, decoded));
+  malformed = encoded;
+  malformed[1] = 1U;
+  TEST_ASSERT_FALSE(cmt::decodeVoiceMessage(malformed, decoded));
+  // 尾端 padding 位元必須為零，避免同一段語音有多種合法編碼。
+  malformed = encoded;
+  malformed.back() |= 0x01U;
   TEST_ASSERT_FALSE(cmt::decodeVoiceMessage(malformed, decoded));
 
   voice.frames.push_back(0U);
+  TEST_ASSERT_FALSE(cmt::encodeVoiceMessage(voice, encoded));
+  voice.frames = makeVoiceFrames(cmt::kMaxVoiceFrames + 1U);
   TEST_ASSERT_FALSE(cmt::encodeVoiceMessage(voice, encoded));
 }
 

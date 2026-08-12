@@ -11,8 +11,8 @@ namespace {
 
 constexpr std::uint8_t kBeaconVersion = 1;
 constexpr std::size_t kBeaconFixedBytes = 13;
-constexpr std::uint8_t kVoiceVersion = 1;
-constexpr std::size_t kVoiceFixedBytes = 8;
+// v2 起改用 Codec2 700C 加跨幀位元打包，並移除可由 codec id 推得的欄位。
+constexpr std::uint8_t kVoiceVersion = 2;
 
 void writeU32(std::vector<std::uint8_t>& output, const std::uint32_t value) {
   output.push_back(static_cast<std::uint8_t>(value >> 24U));
@@ -28,28 +28,56 @@ std::uint32_t readU32(const std::uint8_t* input) {
          static_cast<std::uint32_t>(input[3]);
 }
 
-void writeU16(std::vector<std::uint8_t>& output, const std::uint16_t value) {
-  output.push_back(static_cast<std::uint8_t>(value >> 8U));
-  output.push_back(static_cast<std::uint8_t>(value));
-}
-
-std::uint16_t readU16(const std::uint8_t* input) {
-  return static_cast<std::uint16_t>(
-      (static_cast<std::uint16_t>(input[0]) << 8U) |
-      static_cast<std::uint16_t>(input[1]));
-}
-
 bool isValidVoiceMetadata(const VoiceMessage& voice) {
-  if (voice.codec != VoiceCodec::Codec2_1300 ||
-      voice.sample_rate_hz != kVoiceSampleRateHz ||
-      voice.samples_per_frame != kVoiceSamplesPerFrame ||
-      voice.bytes_per_frame != kVoiceBytesPerFrame || voice.frames.empty() ||
-      voice.frames.size() % voice.bytes_per_frame != 0U) {
+  if (voice.codec != VoiceCodec::Codec2_700C || voice.frames.empty() ||
+      voice.frames.size() % kVoiceCodedBytesPerFrame != 0U) {
     return false;
   }
   const std::size_t frame_count =
-      voice.frames.size() / voice.bytes_per_frame;
+      voice.frames.size() / kVoiceCodedBytesPerFrame;
   return frame_count <= kMaxVoiceFrames;
+}
+
+bool readBit(const std::uint8_t* buffer, const std::size_t bit_index) {
+  return ((buffer[bit_index / 8U] >> (7U - bit_index % 8U)) & 1U) != 0U;
+}
+
+void writeBit(std::uint8_t* buffer, const std::size_t bit_index) {
+  buffer[bit_index / 8U] |=
+      static_cast<std::uint8_t>(1U << (7U - bit_index % 8U));
+}
+
+// codec2 以 MSB-first 由 byte 0 起填入 28 個有效位元，其餘為 padding。這裡把
+// 每幀的有效位元接續成連續位元流。
+void packVoiceFrames(const std::vector<std::uint8_t>& coded,
+                     const std::size_t frame_count,
+                     std::vector<std::uint8_t>& packed) {
+  packed.assign(packedVoiceBytes(frame_count), 0U);
+  std::size_t out_bit = 0;
+  for (std::size_t frame = 0; frame < frame_count; ++frame) {
+    const std::uint8_t* source =
+        coded.data() + frame * kVoiceCodedBytesPerFrame;
+    for (std::size_t bit = 0; bit < kVoiceBitsPerFrame; ++bit, ++out_bit) {
+      if (readBit(source, bit)) {
+        writeBit(packed.data(), out_bit);
+      }
+    }
+  }
+}
+
+void unpackVoiceFrames(const std::uint8_t* packed,
+                       const std::size_t frame_count,
+                       std::vector<std::uint8_t>& coded) {
+  coded.assign(frame_count * kVoiceCodedBytesPerFrame, 0U);
+  std::size_t in_bit = 0;
+  for (std::size_t frame = 0; frame < frame_count; ++frame) {
+    std::uint8_t* target = coded.data() + frame * kVoiceCodedBytesPerFrame;
+    for (std::size_t bit = 0; bit < kVoiceBitsPerFrame; ++bit, ++in_bit) {
+      if (readBit(packed, in_bit)) {
+        writeBit(target, bit);
+      }
+    }
+  }
 }
 
 }  // namespace
@@ -137,37 +165,42 @@ bool encodeVoiceMessage(const VoiceMessage& voice,
   if (!isValidVoiceMetadata(voice)) {
     return false;
   }
-  const auto frame_count = static_cast<std::uint8_t>(
-      voice.frames.size() / voice.bytes_per_frame);
+  const std::size_t frame_count =
+      voice.frames.size() / kVoiceCodedBytesPerFrame;
+  std::vector<std::uint8_t> packed;
+  packVoiceFrames(voice.frames, frame_count, packed);
+
   output.clear();
-  output.reserve(kVoiceFixedBytes + voice.frames.size());
+  output.reserve(kVoiceHeaderBytes + packed.size());
   output.push_back(kVoiceVersion);
   output.push_back(static_cast<std::uint8_t>(voice.codec));
-  writeU16(output, voice.sample_rate_hz);
-  writeU16(output, voice.samples_per_frame);
-  output.push_back(voice.bytes_per_frame);
-  output.push_back(frame_count);
-  output.insert(output.end(), voice.frames.begin(), voice.frames.end());
+  output.push_back(static_cast<std::uint8_t>(frame_count));
+  output.insert(output.end(), packed.begin(), packed.end());
   return true;
 }
 
 bool decodeVoiceMessage(const std::vector<std::uint8_t>& input,
                         VoiceMessage& voice) {
-  if (input.size() <= kVoiceFixedBytes || input[0] != kVoiceVersion) {
+  if (input.size() <= kVoiceHeaderBytes || input[0] != kVoiceVersion) {
     return false;
   }
+  const std::size_t frame_count = input[2];
+  if (frame_count == 0U || frame_count > kMaxVoiceFrames ||
+      input.size() != kVoiceHeaderBytes + packedVoiceBytes(frame_count)) {
+    return false;
+  }
+  // 末位元組的 padding 位元必須為零，避免同一段語音有多種合法編碼。
+  const std::size_t padding_bits =
+      packedVoiceBytes(frame_count) * 8U - frame_count * kVoiceBitsPerFrame;
+  if (padding_bits > 0U &&
+      (input.back() & ((1U << padding_bits) - 1U)) != 0U) {
+    return false;
+  }
+
   VoiceMessage decoded{};
   decoded.codec = static_cast<VoiceCodec>(input[1]);
-  decoded.sample_rate_hz = readU16(input.data() + 2U);
-  decoded.samples_per_frame = readU16(input.data() + 4U);
-  decoded.bytes_per_frame = input[6];
-  const std::size_t frame_count = input[7];
-  const std::size_t expected_size =
-      kVoiceFixedBytes + frame_count * decoded.bytes_per_frame;
-  if (frame_count == 0U || input.size() != expected_size) {
-    return false;
-  }
-  decoded.frames.assign(input.begin() + kVoiceFixedBytes, input.end());
+  unpackVoiceFrames(input.data() + kVoiceHeaderBytes, frame_count,
+                    decoded.frames);
   if (!isValidVoiceMetadata(decoded)) {
     return false;
   }

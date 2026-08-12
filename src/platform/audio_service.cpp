@@ -18,8 +18,9 @@ namespace cmt {
 namespace {
 
 constexpr std::uint32_t kSampleRate = kVoiceSampleRateHz;
-constexpr std::uint32_t kMaxRecordingMs = 3000;
-constexpr std::size_t kMaxSamples = kSampleRate * kMaxRecordingMs / 1000U;
+constexpr std::uint32_t kMaxRecordingMs = kMaxVoiceDurationMs;
+constexpr std::size_t kMaxSamples =
+    static_cast<std::size_t>(kMaxVoiceFrames) * kVoiceSamplesPerFrame;
 constexpr std::uint8_t kDefaultVolumePercent = 50;
 
 }  // namespace
@@ -37,20 +38,22 @@ class AudioService::Impl {
   bool begin() {
     applyVolume();
 #if CMT_CODEC2_AVAILABLE
-    codec_ = codec2_create(CODEC2_MODE_1300);
+    codec_ = codec2_create(CODEC2_MODE_700C);
     if (codec_ == nullptr) {
       return false;
     }
     samples_per_frame_ = codec2_samples_per_frame(codec_);
-    bytes_per_frame_ = (codec2_bits_per_frame(codec_) + 7) / 8;
+    bytes_per_frame_ = codec2_bytes_per_frame(codec_);
     if (samples_per_frame_ != kVoiceSamplesPerFrame ||
-        bytes_per_frame_ != kVoiceBytesPerFrame) {
+        codec2_bits_per_frame(codec_) != kVoiceBitsPerFrame ||
+        bytes_per_frame_ != kVoiceCodedBytesPerFrame) {
       codec2_destroy(codec_);
       codec_ = nullptr;
       return false;
     }
     pcm_.resize(kMaxSamples);
-    encoded_.reserve(kMaxVoiceFrames * kVoiceBytesPerFrame);
+    encoded_.reserve(static_cast<std::size_t>(kMaxVoiceFrames) *
+                     kVoiceCodedBytesPerFrame);
     available_ = samples_per_frame_ > 0 && bytes_per_frame_ > 0;
 #endif
     return available_;

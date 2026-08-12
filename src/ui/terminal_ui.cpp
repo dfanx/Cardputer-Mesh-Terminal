@@ -340,7 +340,7 @@ void TerminalUi::renderRecording(const float progress) {
   auto& display = gfx();
   display.setTextColor(kWhite, kBackground);
   display.setCursor(63, 36);
-  display.print("錄音中，最長 3 秒");
+  display.print("錄音中，最長 2.2 秒");
   display.drawRect(20, 67, 200, 20, kWhite);
   const int filled = static_cast<int>(198.0F * std::max(0.0F, 1.0F - progress));
   display.fillRect(21, 68, filled, 18, kRed);
