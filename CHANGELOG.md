@@ -34,12 +34,15 @@
 ### Verification status
 
 - 已在單機實測：建置、燒錄（COM3、hash verified）與開機流程；離螢幕緩衝配置成功，畫面閃爍經實機確認已消除。
-- 未驗證：所有發射與接收鏈路（文字、罐頭訊息、Beacon、語音、Mesh 中繼）——天線尚未到貨，天線安全閘在確認前本來就禁止發射。GNSS 定位、SD 軌跡與語音錄放同樣未在實機確認。
-- `pio check` 通過（專案原始碼 0 high／0 medium）。native 測試未執行：開發機缺 MSVC 工具鏈；該測試只涵蓋未改動的 `src/core`。
+- **語音錄音鏈路已在實機驗證**：`codec2_create(CODEC2_MODE_700C)` 配置成功（狀態列 `V:Y`），未重演 MODE_1300 的 loopTask 堆疊溢位；連續兩次 PTT 分別擷取 46 與 55 幀（後者錄滿 2.2 秒緩衝上限），`M5Cardputer.Mic.record()` 失敗 0 次，麥克風／喇叭資源切換正常。
+- 語音編碼與 wire format 已用真實錄音（2.82 秒人聲）在主機端驗證：走過 `encodeVoiceMessage()`／`decodeVoiceMessage()` 後位元流完全一致，2.2 秒段落為 196 bytes、單一 fragment。
+- **未驗證：所有發射與接收鏈路**（文字、罐頭訊息、Beacon、語音、Mesh 中繼）。測試機沒有 LoRa cap 模組，`radio_.begin()` 失敗、狀態列顯示 `R:N`，`sendPayload()` 的前置檢查一律擋下。GNSS 同樣來自該 cap，`GPS 0`。
+- 語音**播放**路徑（`codec2_decode` 加 `Speaker.playRaw()`）未在實機執行過：它只在收到語音封包時觸發，沒有 LoRa 就沒有觸發來源，也沒有本機回放路徑。
+- `pio check` 通過（專案原始碼 0 high／0 medium）。native 測試 9/9 通過：開發機的 Visual Studio 缺 C++ 工作負載，改由 `tools/test-native.cmd` 的 WSL g++ 路徑執行。
 
 ### Known limitations
 
 - 尚未以兩台/三台實機驗證 RF、GNSS、SD、音訊與 relay journey。
 - 天線是否安裝無法由硬體確認。SX1262 沒有 VSWR 或反射功率量測，天線安全閘依賴操作者判定；自動偵測到的只有 LoRa cap 模組是否在 I2C/SPI 上回應。
 - 4 位 PIN 可被離線枚舉，只用於群組辨識與基本內容遮蔽。
-- 語音音質、實際空中時間、丟片體驗與錄放音切換尚未經兩台實機驗證。
+- 語音音質與實際空中時間尚未經兩台實機驗證。700C 的中文可懂度是這次改用低位元率的核心風險，主機端試聽只是音質上限——實機用的是 Cardputer Adv 的麥克風，表現會更差。不滿意時的退路見 ADR-006 的 revisit trigger。
