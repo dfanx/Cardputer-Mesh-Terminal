@@ -60,6 +60,7 @@ class AudioService::Impl {
   }
 
   bool startRecording(const std::uint32_t now_ms) {
+    (void)now_ms;
     if (!available_ || recording_ || playing_) {
       return false;
     }
@@ -76,7 +77,9 @@ class AudioService::Impl {
     pcm_.resize(kMaxSamples);
     completed_samples_ = 0;
     encoded_.clear();
-    started_at_ms_ = now_ms;
+    // 呼叫端的 now_ms 是提示音之前取的，拿它當起點等於把約 200 ms 的嗶聲算進
+    // 錄音時間，錄音窗口會短少同樣的量。以實際開始收音的時刻為準。
+    started_at_ms_ = millis();
     recording_ = true;
     return true;
   }

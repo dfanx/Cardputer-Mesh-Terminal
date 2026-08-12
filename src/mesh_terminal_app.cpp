@@ -144,9 +144,11 @@ void MeshTerminalApp::handleInput(const std::uint32_t now_ms) {
     if (audio_.updateRecording(space_held, now_ms)) {
       std::vector<std::uint8_t> encoded;
       if (audio_.takeEncoded(encoded) && sendVoice(encoded)) {
-        showNotice("語音", "3 秒內語音已排入傳送", kNoticeGreen);
+        showNotice("語音", "語音已排入傳送", kNoticeGreen);
       } else {
-        showNotice("語音", "沒有可傳送的語音資料", kNoticeYellow);
+        // 一幀都沒錄到，實務上幾乎都是按一下就放開：startRecording() 的提示音
+        // 會先擋掉約 200 ms，太短的按壓結束時連 40 ms 的第一幀都湊不滿。
+        showNotice("語音", "錄音過短，請按住 Space 說完再放開", kNoticeYellow);
       }
     }
     // 錄音中不設 dirty_：進度條交給 render() 的 100 ms 週期更新就夠，否則會在
