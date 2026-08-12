@@ -31,6 +31,12 @@
 - `tools\test-native.cmd` 在未登記 `VC.Tools.x86.x64` component id 的 Visual Studio 安裝上會誤判找不到 MSVC，改以 `vcvars64.bat` 是否存在為判準。
 - 從 repo 根目錄以外的位置執行（例如對 `deploy\flash-dev.cmd` 按「以系統管理員身分執行」，工作目錄會是 `C:\Windows\System32`）時，PlatformIO 以當前目錄尋找 `platformio.ini` 而失敗，出現 `NotPlatformIOProjectError`。`tools\pio.cmd` 改為執行前先 `cd /d` 到 repo 根目錄；`setlocal` 會在腳本結束時還原呼叫端的工作目錄。
 
+### Verification status
+
+- 已在單機實測：建置、燒錄（COM3、hash verified）與開機流程；離螢幕緩衝配置成功，畫面閃爍經實機確認已消除。
+- 未驗證：所有發射與接收鏈路（文字、罐頭訊息、Beacon、語音、Mesh 中繼）——天線尚未到貨，天線安全閘在確認前本來就禁止發射。GNSS 定位、SD 軌跡與語音錄放同樣未在實機確認。
+- `pio check` 通過（專案原始碼 0 high／0 medium）。native 測試未執行：開發機缺 MSVC 工具鏈；該測試只涵蓋未改動的 `src/core`。
+
 ### Known limitations
 
 - 尚未以兩台/三台實機驗證 RF、GNSS、SD、音訊與 relay journey。
