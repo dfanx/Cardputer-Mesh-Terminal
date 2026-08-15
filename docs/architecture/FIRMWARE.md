@@ -5,7 +5,7 @@
 ```text
 UI / Application state machine
         |
-Use cases: pairing, text, beacon, PTT, history, track/radar
+Use cases: pairing, text, beacon, PTT, history, radar
         |
 Core: channel plan, message codec, fragment/reassembly,
       wire protocol, AEAD, sequence gaps, mesh routing, geo math
@@ -48,7 +48,7 @@ LoRa PHY CRC 保留；應用層不再增加無法抵抗惡意修改的 CRC16。T
 
 - Text：UTF-8/ASCII bytes，v1 UI 自由輸入限制 160 bytes；快捷中文由預編碼 UTF-8 發送。
 - Beacon v2（ADR-007）：`version(1), flags(1), lat/lon E7(4+4), signed altitude meters(2), battery(1), callsign_len(1), callsign(≤12)`。`flags` bit0 = has_fix，其餘 bit 保留且必須為零。沒有 fix 時照樣廣播，座標欄位必須全零；解碼端遇到「no-fix 帶非零座標」或未定義 flag 一律拒收。
-- Voice：8-byte schema 為 `version(1), codec(1), sample_rate(2), samples_per_frame(2), bytes_per_frame(1), frame_count(1)`，後接 Codec2 1300 frames。固定 8 kHz、320 samples/7 bytes per frame、最多 75 frames；完整三秒為 533 bytes，通常切成三片。只有所有片在 timeout 內到齊且 metadata/長度驗證通過才解碼播放。
+- Voice v2（ADR-006）：3-byte header 為 `version(1), codec(1), frame_count(1)`，後接跨幀位元打包的 Codec2 700C frames（28 bits/frame、40 ms、8 kHz）。取樣率、幀長與每幀位元數由 codec id 決定，不重複放進 wire format。`kMaxVoiceFrames` 由單一 fragment 的 197-byte 預算反推為 55 幀＝2.2 秒，header+payload 剛好 196 bytes，保證單一 fragment，不分片。末位元組 padding 位元必須為零，否則拒收。只有 metadata/長度驗證通過才解碼播放。
 
 ## Mesh rules
 
@@ -58,10 +58,9 @@ Radio adapter 在轉發前執行 CAD。忙碌時以硬體 RNG 取 50–200 ms �
 
 ## State and storage
 
-- NVS/Preferences：node id、daily sequence、message counter、PIN-derived profile metadata；不保存明文 PIN。
-- SD `/message.txt`：每行一個 UTF-8 快捷短語，最多 9 行/每行 80 bytes；解析失敗回退內建短語。
-- SD `/tracks/YYYYMMDD.csv`：有效 GNSS fix 依時間/距離節流後附加。v1 畫面只讀當次開機的 bounded point ring，避免整日檔案耗盡 RAM。
-- flash `logfs` 分割（LittleFS，4.9 MB，ADR-008）：`/msg.log` 每行一筆 `id|unix|kind|source|dir|clip|sender|text`，`/v/<clip_id>.c2` 為 Codec2 位元組對齊音檔。開機只讀檔尾 12 KB 還原顯示用的 60 筆 ring。可用空間低於 128 KB 時只刪編號最舊的語音；文字有自己的 384 KB 上限才輪替，不因語音空間不足而被刪。這個分割與 SD 上的軌跡互不影響。
+- NVS/Preferences：node id、daily sequence、message counter、PIN-derived profile metadata、使用者代號、群組 PIN（明碼，ADR-010）。PIN 的安全目標只有群組辨識，畫面上本來就明碼顯示，NVS 多存一份不擴大威脅模型。
+- SD `/message.txt`：每行一個 UTF-8 快捷短語，最多 9 行/每行 80 bytes；解析失敗回退內建短語。這是目前唯一的 SD 用途（ADR-011 移除了 `/tracks/*.csv` 全軌跡記錄）。
+- flash `logfs` 分割（LittleFS，4.9 MB，ADR-008）：`/msg.log` 每行一筆 `id|unix|kind|source|dir|clip|sender|text`，`/v/<clip_id>.c2` 為 Codec2 位元組對齊音檔。開機只讀檔尾 12 KB 還原顯示用的 60 筆 ring。可用空間低於 128 KB 時只刪編號最舊的語音；文字有自己的 384 KB 上限才輪替，不因語音空間不足而被刪。
 
 ## Failure behavior
 
@@ -77,4 +76,4 @@ Radio adapter 在轉發前執行 CAD。忙碌時以硬體 RNG 取 50–200 ms �
 
 1. Core gate：native tests 覆蓋 wire round-trip/拒絕壞格式、分片邊界、重組亂序/超時、去重/TTL、sequence、geo、profile determinism 與語音 schema/三秒界線。
 2. Firmware gate：PlatformIO `cardputer-adv` clean build；static check 若工具可用。
-3. Hardware gate：兩機文字/Beacon/語音、三機 relay、GNSS track、SD phrases/key、電池與 airtime 實測。沒有硬體時不得宣稱通過。
+3. Hardware gate：兩機文字/Beacon/語音、三機 relay、GNSS radar、SD phrases/key、電池與 airtime 實測。沒有硬體時不得宣稱通過。

@@ -36,6 +36,7 @@ M5Stack Cardputer Adv + Cap LoRa-1262/GNSS 的山區離網文字、定位與短�
 
 - Cardputer Adv 的 LoRa 天線開關必須透過 I2C `PI4IOE5V6408` P0 拉高，否則 SX1262 初始化成功也可能無 RF 路徑。
 - Cardputer Adv 的麥克風與喇叭共用音訊資源，錄放音切換前必須停止目前工作並切換 `M5.Mic` / `M5.Speaker`。
+- M5Unified 0.2.19 對 `board_M5CardputerADV` 的喇叭 enable callback（`M5Unified.cpp` 的 `_speaker_enabled_cb_cardputer_adv`）在 `enabled=false` 時送出的是空 bulk data，`M5Cardputer.Speaker.end()` 因此從未真的把 ES8311 斷電——只有 I2S 任務停止，類比電路持續通電。`src/platform/audio_service.cpp` 的 `powerDownEs8311()` 補了這個 no-op：直接對 I2C 位址 `0x18` 送出 `0x0D=0xFC`（關類比電路）與 `0x00=0x00`（CSM power down），鏡射同一份原始碼裡 echo 系列板子既有的斷電序列。上游若修正這個 callback，這段補丁可以移除。
 - Windows 命令列上限 32767 字元。ESP32 Arduino framework 會帶入約 200 個 `-I`，核心目錄若放在長路徑下會讓編譯命令超限，症狀是 `xtensa-esp32s3-elf-g++: error: CreateProcess: No such file or directory`（不是工具鏈損毀）。`tools/pio.cmd` 因此改為：顯式 `PLATFORMIO_CORE_DIR` 優先，其次已存在的 repo-local `.platformio`，否則落回 `%USERPROFILE%\.platformio`。
 - 沒裝 C++ 工作負載的 Visual Studio 仍會留下 `vcvars64.bat` 與 `VC\Tools\MSVC\<ver>\bin`、`lib`，但缺 `vcvarsall.bat` 與 STL 標頭，`vswhere` 也照樣回報安裝路徑。`tools/test-native.cmd` 因此改以 `vcvarsall.bat` 是否存在為準，缺席時自動改用預設 WSL distro 執行 `tools/test-native-wsl.sh`（需 `wsl -- sudo apt-get install -y g++`）。core 是純 C++17，兩條路徑跑同一組測試與同一組警告旗標。
 - native 測試用的 Unity 由 PlatformIO 下載到 `.pio/libdeps/native/`，全新 clone 需先跑一次 `.\tools\pio.cmd test -e native`（該指令本身會因缺 gcc 而失敗，但套件已取得），之後 `tools/test-native.cmd` 才有東西可編。

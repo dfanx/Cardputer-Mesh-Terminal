@@ -320,6 +320,41 @@ std::uint32_t MessageStore::appendVoice(
   return record_id;
 }
 
+bool MessageStore::clearAll() {
+  if (!ready_) {
+    return false;
+  }
+  bool all_removed = true;
+  if (LittleFS.exists(kLogPath)) {
+    all_removed = LittleFS.remove(kLogPath) && all_removed;
+  }
+  File dir = LittleFS.open(kClipDir);
+  if (dir && dir.isDirectory()) {
+    // 用編號重建路徑再刪，跟 deleteOldestClip() 同一招：不同 Arduino core 版本
+    // 對 File::name() 回傳完整路徑還是只有檔名不一致，直接信任它組路徑會出錯。
+    std::vector<std::uint32_t> ids;
+    for (File entry = dir.openNextFile(); entry; entry = dir.openNextFile()) {
+      if (entry.isDirectory()) {
+        continue;
+      }
+      const std::uint32_t id = clipIdFromName(entry.name());
+      if (id != 0U) {
+        ids.push_back(id);
+      }
+    }
+    dir.close();
+    for (const std::uint32_t id : ids) {
+      char path[32]{};
+      clipPath(id, path, sizeof(path));
+      all_removed = LittleFS.remove(path) && all_removed;
+    }
+  }
+  next_record_id_ = 1U;
+  next_clip_id_ = 1U;
+  clip_count_ = 0U;
+  return all_removed;
+}
+
 bool MessageStore::hasClip(const std::uint32_t clip_id) const {
   if (!ready_ || clip_id == 0U) {
     return false;

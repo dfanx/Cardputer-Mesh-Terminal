@@ -3,6 +3,7 @@
 #include <M5Cardputer.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 
 namespace cmt {
@@ -17,6 +18,7 @@ constexpr std::uint16_t kRed = 0xF800;
 constexpr std::uint16_t kOrange = 0xFC00;
 constexpr std::uint16_t kWhite = 0xFFFF;
 constexpr std::uint16_t kMuted = 0x8410;
+constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
 
 // 只有一個 UI 實例，離螢幕緩衝就放在這裡。整頁在記憶體裡畫完再一次推到面板，
 // 是消除閃爍的關鍵：先前每次更新都直接對面板 fillScreen 再逐項重畫，肉眼會看到
@@ -232,47 +234,67 @@ void TerminalUi::renderAntennaCheck(const bool module_detected) {
   endFrame();
 }
 
-void TerminalUi::drawTrack(const std::vector<GeoPoint>& track, const int x,
-                           const int y, const int width, const int height) {
+void TerminalUi::drawRadar(const UiHomeModel& model, const int x, const int y,
+                           const int width, const int height) {
   auto& display = gfx();
   display.drawRect(x, y, width, height, kMuted);
-  if (track.empty()) {
+  const int cx = x + width / 2;
+  const int cy = y + height / 2;
+  const int max_radius = std::min(width, height) / 2 - 5;
+
+  if (model.peers.empty()) {
     display.setTextColor(kMuted, kBackground);
-    display.setCursor(x + 8, y + height / 2 - 6);
-    display.print("等待軌跡");
+    display.setCursor(x + 8, y + height / 2 - 10);
+    display.print("尚無隊友");
+    display.setCursor(x + 8, y + height / 2 + 4);
+    display.print(model.own_position.valid ? "等待隊友回報" : "本機尚無定位");
     return;
   }
 
-  double min_lat = track.front().latitude;
-  double max_lat = min_lat;
-  double min_lon = track.front().longitude;
-  double max_lon = min_lon;
-  for (const auto& point : track) {
-    min_lat = std::min(min_lat, point.latitude);
-    max_lat = std::max(max_lat, point.latitude);
-    min_lon = std::min(min_lon, point.longitude);
-    max_lon = std::max(max_lon, point.longitude);
-  }
-  const double lat_range = std::max(0.00001, max_lat - min_lat);
-  const double lon_range = std::max(0.00001, max_lon - min_lon);
-  int previous_x = 0;
-  int previous_y = 0;
-  bool have_previous = false;
-  for (const auto& point : track) {
-    const int px = x + 3 + static_cast<int>(
-                               (point.longitude - min_lon) / lon_range *
-                               static_cast<double>(width - 7));
-    const int py = y + height - 4 - static_cast<int>(
-                                      (point.latitude - min_lat) / lat_range *
-                                      static_cast<double>(height - 7));
-    if (have_previous) {
-      display.drawLine(previous_x, previous_y, px, py, kGreen);
+  // 兩圈刻度圓加十字準線，中心點是本機。
+  display.drawCircle(cx, cy, max_radius, kMuted);
+  display.drawCircle(cx, cy, max_radius / 2, kMuted);
+  display.drawLine(cx - max_radius, cy, cx + max_radius, cy, kMuted);
+  display.drawLine(cx, cy - max_radius, cx, cy + max_radius, kMuted);
+  display.fillCircle(cx, cy, 3, kWhite);
+
+  // 尺度自動依目前最遠的隊友縮放，讓每個人都畫得進圖框，而不是用固定比例尺
+  // 讓近的隊友全部疊在中心點。
+  double max_distance = 0.0;
+  bool any_positioned = false;
+  for (const UiPeer& peer : model.peers) {
+    if (peer.relative.valid) {
+      max_distance = std::max(max_distance, peer.relative.distance_m);
+      any_positioned = true;
     }
-    previous_x = px;
-    previous_y = py;
-    have_previous = true;
   }
-  display.fillCircle(previous_x, previous_y, 2, kYellow);
+  if (!any_positioned) {
+    display.setTextColor(kMuted, kBackground);
+    display.setCursor(x + 6, y + height - 14);
+    display.print(model.own_position.valid ? "隊友位置未知" : "本機尚無定位");
+    return;
+  }
+  max_distance = std::max(max_distance, 30.0);
+
+  for (std::size_t index = 0; index < model.peers.size(); ++index) {
+    const UiPeer& peer = model.peers[index];
+    if (!peer.relative.valid) {
+      continue;
+    }
+    const double ratio =
+        std::min(1.0, peer.relative.distance_m / max_distance);
+    const double bearing_rad = peer.relative.bearing_deg * kDegToRad;
+    const int px = cx + static_cast<int>(std::lround(
+                             std::sin(bearing_rad) * ratio * max_radius));
+    const int py = cy - static_cast<int>(std::lround(
+                             std::cos(bearing_rad) * ratio * max_radius));
+    const bool active = index == (model.selected_peer % model.peers.size());
+    display.fillCircle(px, py, active ? 3 : 2, active ? kYellow : kGreen);
+  }
+
+  display.setTextColor(kMuted, kBackground);
+  display.setCursor(x + 2, y + height - 10);
+  display.printf("~%.1fkm", max_distance / 1000.0);
 }
 
 void TerminalUi::drawWrapped(const std::string& text, const int x, const int y,
@@ -342,7 +364,7 @@ void TerminalUi::renderHome(const UiHomeModel& model) {
     display.printf("B-- L%02u", static_cast<unsigned>(model.volume_percent));
   }
 
-  drawTrack(model.track, 2, 21, 145, 77);
+  drawRadar(model, 2, 21, 145, 77);
   // GPS 只顯示一個 0 沒辦法判斷該走到室外還是該檢查模組，所以定位數/可見數與
   // 鏈路狀態一起給。
   const bool gnss_alive = model.gnss_link == GnssLink::Fixed ||
@@ -402,7 +424,8 @@ void TerminalUi::renderMessageMenu(
     const std::vector<std::string>& messages, const std::size_t selected) {
   header("罐頭訊息選單", kBlue);
   auto& display = gfx();
-  const std::size_t total = messages.size() + 1U;
+  const std::size_t share_index = messages.size();
+  const std::size_t total = messages.size() + 2U;
   const std::size_t first = selected > 3U ? selected - 3U : 0U;
   const std::size_t last = std::min(total, first + 5U);
   for (std::size_t index = first; index < last; ++index) {
@@ -415,6 +438,9 @@ void TerminalUi::renderMessageMenu(
     if (index < messages.size()) {
       display.printf("%u. %s", static_cast<unsigned>(index + 1U),
                      messages[index].c_str());
+    } else if (index == share_index) {
+      display.printf("%u. 分享目前位置",
+                     static_cast<unsigned>(index + 1U));
     } else {
       display.print("自由輸入英數訊息...");
     }
@@ -459,10 +485,26 @@ void TerminalUi::renderRecording(const float progress) {
 }
 
 void TerminalUi::renderHistory(const std::vector<UiHistoryEntry>& history,
-                               const std::size_t selected) {
-  header("訊息歷史", kBlue);
+                               const std::size_t selected,
+                               const bool confirm_clear) {
+  header(confirm_clear ? "確定清除全部歷史？" : "訊息歷史",
+         confirm_clear ? kRed : kBlue);
   auto& display = gfx();
   bool selected_has_clip = false;
+  if (confirm_clear) {
+    display.setTextColor(kWhite, kBackground);
+    display.setCursor(8, 40);
+    display.printf("將刪除 %u 則訊息與全部語音音檔",
+                   static_cast<unsigned>(history.size()));
+    display.setTextColor(kRed, kBackground);
+    display.setCursor(8, 58);
+    display.print("此操作無法復原");
+    display.setTextColor(kMuted, kBackground);
+    display.setCursor(8, 120);
+    display.print("Y 確定刪除 / N 或 Esc 取消");
+    endFrame();
+    return;
+  }
   if (history.empty()) {
     display.setTextColor(kMuted, kBackground);
     display.setCursor(74, 62);
@@ -492,8 +534,13 @@ void TerminalUi::renderHistory(const std::vector<UiHistoryEntry>& history,
   }
   display.setTextColor(kMuted, kBackground);
   display.setCursor(4, 120);
-  display.print(selected_has_clip ? "↑↓ 瀏覽  Enter 重播  Esc 返回"
-                                  : "↑↓ 瀏覽 / Esc 返回");
+  if (selected_has_clip) {
+    display.print("↑↓瀏覽 Enter重播 D清除 Esc返回");
+  } else if (!history.empty()) {
+    display.print("↑↓瀏覽 D清除全部 Esc返回");
+  } else {
+    display.print("↑↓ 瀏覽 / Esc 返回");
+  }
   endFrame();
 }
 

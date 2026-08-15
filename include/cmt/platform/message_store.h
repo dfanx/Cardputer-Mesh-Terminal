@@ -46,6 +46,10 @@ class MessageStore {
   bool loadClip(std::uint32_t clip_id, std::vector<std::uint8_t>& frames) const;
   bool hasClip(std::uint32_t clip_id) const;
 
+  // 使用者主動要求的整批清除（歷史畫面按 D 加確認），文字與語音都刪，跟空間不足
+  // 時「只淘汰最舊語音、文字永不刪」的自動淘汰策略是兩回事。
+  bool clearAll();
+
   // 由新到舊回傳最多 max_count 筆，輸出仍以「舊在前」排列，方便直接餵給 UI。
   std::vector<LogRecord> loadRecent(std::size_t max_count) const;
 

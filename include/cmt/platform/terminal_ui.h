@@ -33,7 +33,6 @@ struct UiHomeModel {
   std::uint8_t satellites_in_view = 0;
   GnssLink gnss_link = GnssLink::NoData;
   GeoPoint own_position{};
-  std::vector<GeoPoint> track;
   std::vector<UiPeer> peers;
   std::size_t selected_peer = 0;
   std::size_t tx_queued = 0;
@@ -80,14 +79,17 @@ class TerminalUi {
   void renderTextInput(const std::string& text);
   void renderRecording(float progress);
   void renderHistory(const std::vector<UiHistoryEntry>& history,
-                     std::size_t selected);
+                     std::size_t selected, bool confirm_clear);
   void renderInbox(const UiInboxItem& item);
   void renderNotice(const std::string& title, const std::string& message,
                     std::uint16_t color);
 
  private:
   void header(const char* title, std::uint16_t color);
-  void drawTrack(const std::vector<GeoPoint>& track, int x, int y, int width,
+  // 以圖框中心為本機，依相對方位/距離畫出隊友雷達點；沒有隊友或都沒有可用相對
+  // 位置時顯示提示文字。取代舊版的全軌跡折線——GNSS 漂移在小螢幕上畫出來的線
+  // 本身沒有導航價值，隊友的即時相對方位才是實際會用到的資訊。
+  void drawRadar(const UiHomeModel& model, int x, int y, int width,
                  int height);
   void drawHomeHints(const UiHomeModel& model);
   void drawWrapped(const std::string& text, int x, int y, int line_height,

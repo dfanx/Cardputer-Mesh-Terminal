@@ -5,6 +5,7 @@
 #include <M5Cardputer.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <utility>
 
 #if CMT_ENABLE_VOICE && __has_include(<codec2.h>)
@@ -21,12 +22,47 @@ constexpr std::uint32_t kSampleRate = kVoiceSampleRateHz;
 constexpr std::uint32_t kMaxRecordingMs = kMaxVoiceDurationMs;
 constexpr std::size_t kMaxSamples =
     static_cast<std::size_t>(kMaxVoiceFrames) * kVoiceSamplesPerFrame;
-constexpr std::uint8_t kDefaultVolumePercent = 50;
+// 對講機用途：漏聽比吵更容易出事，預設開到最大，需要安靜再自己調低。
+constexpr std::uint8_t kDefaultVolumePercent = 100;
 // 輸出停止後多久關掉功放。留一小段是為了讓「提示音 → 語音」這種連續輸出不必反覆
 // 開關 I2S；再長就等於一直供電，正是電流聲的來源。
 constexpr std::uint32_t kSpeakerIdleOffMs = 300;
+
+// Codec2 700C 這種低位元率 vocoder 重建出的語音，即使硬體音量已經開到滿
+// （M5Cardputer.Speaker.setVolume(255)）實測仍明顯偏小聲，蓋台語音對講機這種場景
+// 下等於聽不到。M5Unified 的 speaker_config_t::magnification 是板級固定值
+// （Cardputer/Adv 為 16），會連提示音一起放大、容易失真；改在解碼後的 PCM
+// 上做一次數位增益，只影響語音這一條路徑。4x（+12 dB）留了一些餘裕，超過原始
+// 滿幅的樣本會被硬限幅而非環繞成雜訊。
+constexpr float kVoicePlaybackGain = 4.0F;
+
+void applyPlaybackGain(std::vector<std::int16_t>& pcm, const float gain) {
+  for (std::int16_t& sample : pcm) {
+    const float amplified = static_cast<float>(sample) * gain;
+    sample = static_cast<std::int16_t>(
+        std::clamp(amplified, -32768.0F, 32767.0F));
+  }
+}
 // I2S 剛啟動時 isPlaying() 可能還沒反映排入的資料，太早判定閒置會把聲音切掉。
 constexpr std::uint32_t kSpeakerMinOnMs = 120;
+
+constexpr std::uint8_t kEs8311I2cAddr = 0x18;
+
+// M5Unified 0.2.19 的 board_M5CardputerADV 喇叭 enable callback
+// （M5Unified.cpp `_speaker_enabled_cb_cardputer_adv`）在 enabled=false 時送出
+// 的 bulk_data 是空的（只有結束位元組，沒有任何暫存器寫入）——也就是說
+// `M5Cardputer.Speaker.end()` 從未真的把 ES8311 斷電，這才是喇叭用過一次就
+// 持續開著、一直有電流聲的根本原因，跟這個檔案裡 speakerOn()/speakerOff() 的
+// I2S 開關邏輯本身無關（那段邏輯是對的，只是驅動沒有兌現「關閉」）。
+// 在上游修正這個 no-op 之前，這裡鏡射同一份原始碼中其他板子（atomic_echo /
+// atom_echos3r）既有的 ES8311 斷電序列：0x0D 關類比電路、0x00 CSM power down，
+// 補回 driver 沒做的事。
+void powerDownEs8311() {
+  const std::uint8_t analog_off = 0xFCU;
+  const std::uint8_t csm_off = 0x00U;
+  M5.In_I2C.writeRegister(kEs8311I2cAddr, 0x0DU, &analog_off, 1U, 100000U);
+  M5.In_I2C.writeRegister(kEs8311I2cAddr, 0x00U, &csm_off, 1U, 100000U);
+}
 
 }  // namespace
 
@@ -186,6 +222,7 @@ class AudioService::Impl {
       codec2_decode(codec_, pcm_.data() + frame * samples_per_frame_,
                     encoded.data() + frame * bytes_per_frame_);
     }
+    applyPlaybackGain(pcm_, kVoicePlaybackGain);
     M5Cardputer.Mic.end();
     if (!speakerOn()) {
       return false;
@@ -300,6 +337,12 @@ class AudioService::Impl {
     }
     M5Cardputer.Speaker.stop();
     M5Cardputer.Speaker.end();
+    // M5Cardputer.Speaker.end() 不會真的關掉 ES8311（見 powerDownEs8311() 的
+    // 註解），只在裝置實際是 Cardputer ADV 時補發斷電序列，避免對其他板型送出
+    // 對不上的暫存器位址。
+    if (M5.getBoard() == m5::board_t::board_M5CardputerADV) {
+      powerDownEs8311();
+    }
     speaker_active_ = false;
     speaker_idle_since_ms_ = 0;
   }

@@ -86,12 +86,14 @@ class MeshTerminalApp {
   void handleRadio(std::uint32_t now_ms);
   void handleDecodedMessage(const ReassemblyResult& result, float rssi_dbm,
                             std::uint32_t now_ms);
-  void updateTrackAndBeacon(std::uint32_t now_ms);
+  void updateBeacon(std::uint32_t now_ms);
   void render(std::uint32_t now_ms, bool force = false);
 
   bool joinGroup();
   bool sendText(const std::string& text);
   bool sendBeacon();
+  // 罐頭訊息選單的「分享目前位置」項目：立刻送一次 Beacon 並重設下一次排程。
+  void shareLocation();
   bool sendVoice(const std::vector<std::uint8_t>& encoded);
   bool sendPayload(MessageType type, const std::vector<std::uint8_t>& payload);
 
@@ -157,6 +159,9 @@ class MeshTerminalApp {
   std::size_t menu_selected_ = 0;
   std::size_t peer_selected_ = 0;
   std::size_t history_selected_ = 0;
+  // 歷史畫面按 D 觸發，等待 Y/N 確認整批刪除。獨立旗標，不重用 Notice 畫面：
+  // 這裡需要攔截 Y/N 兩種鍵，Notice 是任意鍵即返回。
+  bool history_confirm_clear_ = false;
   std::string notice_title_;
   std::string notice_message_;
   std::uint16_t notice_color_ = 0;

@@ -134,8 +134,10 @@ void MeshTerminalApp::setup() {
 
   delay(350);
   // 第一步先問「這台機器是誰」，代號會進 Beacon 的 callsign，隊友才分得出來源。
-  // 已設定過的代號直接帶入，回訪時按 Enter 就能過。
+  // 已設定過的代號直接帶入，回訪時按 Enter 就能過。群組 PIN 同理：重開機或重燒錄
+  // 後常常就是要回到同一群組，先帶入上次成功配對的 PIN，使用者不必重打。
   user_id_ = device_state_.userId();
+  pin_ = device_state_.pin();
   screen_ = Screen::UserId;
   dirty_ = true;
   render(millis(), true);
@@ -149,7 +151,7 @@ void MeshTerminalApp::loop() {
   if (paired_) {
     radio_.update(now_ms);
     handleRadio(now_ms);
-    updateTrackAndBeacon(now_ms);
+    updateBeacon(now_ms);
   }
   handleInput(now_ms);
   render(now_ms);
@@ -256,8 +258,8 @@ void MeshTerminalApp::handleUserIdInput() {
 void MeshTerminalApp::handlePairingInput() {
   auto& keys = M5Cardputer.Keyboard.keysState();
   if (isEscape(keys)) {
-    // 配對前都還沒發射，退回去改代號是安全的。
-    pin_.clear();
+    // 配對前都還沒發射，退回去改代號是安全的。PIN 不清空：不論是預帶入的上次
+    // 記錄還是使用者正在打的內容，回到代號畫面再按 Enter 回來時應該還在。
     pairing_error_.clear();
     screen_ = Screen::UserId;
     dirty_ = true;
@@ -316,11 +318,14 @@ void MeshTerminalApp::handleHomeInput(const std::uint32_t now_ms,
   auto& keys = M5Cardputer.Keyboard.keysState();
   if (isVolumeUp(keys)) {
     audio_.adjustVolume(10);
+    // 調整後在新音量下發一聲，讓使用者靠聽的就知道現在多大聲，不必只看數字。
+    audio_.playAlert(AlertTone::Confirm);
     dirty_ = true;
     return;
   }
   if (isVolumeDown(keys)) {
     audio_.adjustVolume(-10);
+    audio_.playAlert(AlertTone::Confirm);
     dirty_ = true;
     return;
   }
@@ -344,6 +349,7 @@ void MeshTerminalApp::handleHomeInput(const std::uint32_t now_ms,
   if (isUp(keys)) {
     screen_ = Screen::History;
     history_selected_ = history_.empty() ? 0U : history_.size() - 1U;
+    history_confirm_clear_ = false;
     dirty_ = true;
     return;
   }
@@ -382,7 +388,10 @@ bool MeshTerminalApp::blockedByAntenna() {
 void MeshTerminalApp::handleMenuInput() {
   auto& keys = M5Cardputer.Keyboard.keysState();
   const auto& messages = storage_.cannedMessages();
-  const std::size_t total = messages.size() + 1U;
+  // 罐頭訊息之後多兩格：分享目前位置、自由輸入，順序固定，自由輸入永遠最後一項。
+  const std::size_t share_index = messages.size();
+  const std::size_t free_text_index = messages.size() + 1U;
+  const std::size_t total = messages.size() + 2U;
   if (isEscape(keys)) {
     screen_ = Screen::Home;
     dirty_ = true;
@@ -410,6 +419,10 @@ void MeshTerminalApp::handleMenuInput() {
         }
         return;
       }
+      if (index == share_index) {
+        shareLocation();
+        return;
+      }
     }
   }
   if (keys.enter) {
@@ -422,7 +435,9 @@ void MeshTerminalApp::handleMenuInput() {
       } else {
         showNotice("訊息", "傳送佇列不可用", kNoticeRed);
       }
-    } else {
+    } else if (menu_selected_ == share_index) {
+      shareLocation();
+    } else if (menu_selected_ == free_text_index) {
       text_input_.clear();
       screen_ = Screen::TextInput;
       dirty_ = true;
@@ -461,8 +476,32 @@ void MeshTerminalApp::handleTextInput() {
 
 void MeshTerminalApp::handleHistoryInput() {
   auto& keys = M5Cardputer.Keyboard.keysState();
+  if (history_confirm_clear_) {
+    // 清除是不可逆操作，獨立出一個確認狀態，任何鍵都不會被前一個畫面的殘留
+    // 按鍵誤觸發——沒按到 Y 就一律當取消。
+    if (hasWordCharacter(keys, 'y')) {
+      const bool cleared = store_.clearAll();
+      history_.clear();
+      history_selected_ = 0U;
+      history_confirm_clear_ = false;
+      showNotice("歷史紀錄",
+                 cleared ? "已刪除所有訊息與語音" : "刪除時發生錯誤，部分內容可能仍在",
+                 cleared ? kNoticeGreen : kNoticeRed);
+      return;
+    }
+    if (hasWordCharacter(keys, 'n') || isEscape(keys)) {
+      history_confirm_clear_ = false;
+      dirty_ = true;
+    }
+    return;
+  }
   if (isEscape(keys)) {
     screen_ = Screen::Home;
+    dirty_ = true;
+    return;
+  }
+  if (!history_.empty() && hasWordCharacter(keys, 'd')) {
+    history_confirm_clear_ = true;
     dirty_ = true;
     return;
   }
@@ -550,6 +589,9 @@ bool MeshTerminalApp::joinGroup() {
     pairing_error_ = "群組初始化失敗";
     return false;
   }
+  // 記住這次成功配對的 PIN，下次開機直接帶入。PIN 本來就明碼顯示在這個畫面上，
+  // 拿得到裝置就等於看得到 PIN，多存一份不擴大威脅模型（ADR-010）。
+  device_state_.setPin(pin_);
   paired_ = true;
   pairing_error_.clear();
   const bool radio_ok = radio_.begin(group_);
@@ -646,6 +688,26 @@ bool MeshTerminalApp::sendBeacon() {
   std::vector<std::uint8_t> payload;
   return encodeBeaconMessage(beacon, payload) &&
          sendPayload(MessageType::Beacon, payload);
+}
+
+void MeshTerminalApp::shareLocation() {
+  // 手動觸發的即時 Beacon：跟罐頭訊息長在同一個選單，但走的是 Beacon payload，
+  // 不是 Text，這樣接收端會直接更新雷達上的隊友位置，而不是進未讀訊息佇列。
+  if (blockedByAntenna()) {
+    return;
+  }
+  const bool has_fix = gnss_.snapshot().point.valid;
+  if (sendBeacon()) {
+    next_beacon_ms_ = millis() + kBeaconIntervalMs;
+    recordSystem(has_fix ? "[我] 已分享目前位置" : "[我] 已分享身分（尚無定位）");
+    showNotice("位置", has_fix ? "已分享目前位置，隊友雷達會同步更新"
+                               : "尚無定位，僅分享身分與電量",
+               has_fix ? kNoticeGreen : kNoticeYellow);
+  } else {
+    const char* reason = txBlockReason();
+    showNotice("位置無法分享", reason != nullptr ? reason : "傳送佇列不可用",
+               kNoticeRed);
+  }
 }
 
 bool MeshTerminalApp::sendVoice(
@@ -786,11 +848,7 @@ void MeshTerminalApp::handleDecodedMessage(const ReassemblyResult& result,
   }
 }
 
-void MeshTerminalApp::updateTrackAndBeacon(const std::uint32_t now_ms) {
-  const auto& fix = gnss_.snapshot();
-  if (storage_.maybeAppendTrack(fix.point, fix.day_key, fix.unix_time, now_ms)) {
-    dirty_ = true;
-  }
+void MeshTerminalApp::updateBeacon(const std::uint32_t now_ms) {
   if (antenna_confirmed_ && next_beacon_ms_ != 0U &&
       static_cast<std::int32_t>(now_ms - next_beacon_ms_) >= 0) {
     if (sendBeacon()) {
@@ -966,7 +1024,6 @@ UiHomeModel MeshTerminalApp::buildHomeModel(
   model.satellites_in_view = fix.satellites_in_view;
   model.gnss_link = fix.link;
   model.own_position = fix.point;
-  model.track = storage_.track();
   model.tx_queued = radio_.queuedCount();
   model.tx_inhibited = radio_.transmitInhibited();
   model.unread_count = inbox_.size();
@@ -1052,7 +1109,8 @@ void MeshTerminalApp::render(const std::uint32_t now_ms, const bool force) {
       ui_.renderTextInput(text_input_);
       break;
     case Screen::History:
-      ui_.renderHistory(buildHistoryModel(), history_selected_);
+      ui_.renderHistory(buildHistoryModel(), history_selected_,
+                        history_confirm_clear_);
       break;
     case Screen::Recording:
       ui_.renderRecording(audio_.recordingProgress(now_ms));

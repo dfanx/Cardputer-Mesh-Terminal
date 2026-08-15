@@ -4,6 +4,7 @@
 #include <TinyGPSPlus.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdlib>
 
@@ -49,12 +50,24 @@ std::uint32_t unixTimestamp(TinyGPSDate& date, TinyGPSTime& time) {
 
 }  // namespace
 
-// GSV 的第 3 個欄位是「視野內衛星總數」，TinyGPSPlus 本身不解析，用 custom 欄位
-// 取出來。定位之前這個數字就會動，是判斷天線有沒有在收訊的第一手證據。
+// GSV 的第 3 個欄位是「該衛星系統的視野內衛星總數」，TinyGPSPlus 本身不解析，用
+// custom 欄位取出來。定位之前這個數字就會動，是判斷天線有沒有在收訊的第一手證據。
+//
+// ATGM336H 這類雙模模組會同時送 GPGSV（GPS）與 BDGSV（北斗），GGA 的「used」
+// 欄位是跨系統合計。只讀單一 talker 會讓「已用」看起來大於「可見」（例如
+// 11 顆已用、卻只看到 6 顆 GPS 衛星），所以這裡把常見 talker 的可見數加總。
+constexpr const char* kGsvTalkers[] = {"GPGSV", "BDGSV", "GBGSV", "GLGSV",
+                                       "GAGSV", "GQGSV"};
+constexpr std::size_t kGsvTalkerCount =
+    sizeof(kGsvTalkers) / sizeof(kGsvTalkers[0]);
+
 class GnssService::Impl {
  public:
-  Impl() : satellites_in_view_(gps_, "GPGSV", 3),
-           satellites_in_view_gn_(gps_, "GNGSV", 3) {}
+  Impl() {
+    for (std::size_t index = 0; index < kGsvTalkerCount; ++index) {
+      satellites_in_view_[index].begin(gps_, kGsvTalkers[index], 3);
+    }
+  }
 
   bool begin() {
     Serial1.begin(kGnssBaud, SERIAL_8N1, kGnssRxPin, kGnssTxPin);
@@ -133,17 +146,26 @@ class GnssService::Impl {
   }
 
   void updateSatellitesInView() {
-    const char* value = satellites_in_view_.isValid()
-                            ? satellites_in_view_.value()
-                            : (satellites_in_view_gn_.isValid()
-                                   ? satellites_in_view_gn_.value()
-                                   : nullptr);
-    if (value == nullptr || value[0] == '\0') {
-      return;
+    // 每個 talker 各自更新時才重新累加該筆，其餘沿用上次收到的值：GSV 分好幾則
+    // 訊息才送完一個 talker 的資料，systems 之間也不同步送出。
+    for (std::size_t index = 0; index < kGsvTalkerCount; ++index) {
+      TinyGPSCustom& field = satellites_in_view_[index];
+      if (!field.isUpdated()) {
+        continue;
+      }
+      const char* value = field.value();
+      per_talker_view_[index] = (value != nullptr && value[0] != '\0')
+                                    ? static_cast<std::uint8_t>(std::min(
+                                          99UL, std::strtoul(value, nullptr,
+                                                             10)))
+                                    : 0U;
     }
-    const unsigned long parsed = std::strtoul(value, nullptr, 10);
+    std::uint32_t total = 0;
+    for (const std::uint8_t count : per_talker_view_) {
+      total += count;
+    }
     snapshot_.satellites_in_view =
-        static_cast<std::uint8_t>(std::min<unsigned long>(99UL, parsed));
+        static_cast<std::uint8_t>(std::min<std::uint32_t>(99U, total));
   }
 
   GnssLink classifyLink(const std::uint32_t now_ms) const {
@@ -158,8 +180,8 @@ class GnssService::Impl {
   }
 
   TinyGPSPlus gps_;
-  TinyGPSCustom satellites_in_view_;
-  TinyGPSCustom satellites_in_view_gn_;
+  std::array<TinyGPSCustom, kGsvTalkerCount> satellites_in_view_;
+  std::array<std::uint8_t, kGsvTalkerCount> per_talker_view_{};
   GnssSnapshot snapshot_{};
   std::uint32_t last_sentences_ok_ = 0;
   std::uint32_t last_log_ms_ = 0;

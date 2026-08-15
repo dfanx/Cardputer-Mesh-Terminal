@@ -1,5 +1,7 @@
 #include "cmt/platform/device_state.h"
 
+#include "cmt/core/channel_plan.h"
+
 #include <Preferences.h>
 #include <esp_system.h>
 
@@ -43,6 +45,11 @@ bool DeviceState::begin() {
   if (!isValidUserId(user_id_)) {
     user_id_.clear();
   }
+  const String stored_pin = preferences.getString("pin", "");
+  pin_.assign(stored_pin.c_str());
+  if (!isValidPin(pin_)) {
+    pin_.clear();
+  }
   node_id_ = preferences.getUInt("node", 0);
   if (node_id_ == 0U || node_id_ == 0xFFFFFFFFUL) {
     do {
@@ -69,6 +76,21 @@ bool DeviceState::setUserId(const std::string& user_id) {
   Preferences preferences;
   if (preferences.begin("cmt", false)) {
     preferences.putString("uid", user_id_.c_str());
+    preferences.end();
+  }
+  return true;
+}
+
+std::string DeviceState::pin() const { return pin_; }
+
+bool DeviceState::setPin(const std::string& pin) {
+  if (!isValidPin(pin)) {
+    return false;
+  }
+  pin_ = pin;
+  Preferences preferences;
+  if (preferences.begin("cmt", false)) {
+    preferences.putString("pin", pin_.c_str());
     preferences.end();
   }
   return true;
