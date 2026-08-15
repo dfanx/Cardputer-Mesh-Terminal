@@ -22,6 +22,11 @@ constexpr std::uint32_t kMaxRecordingMs = kMaxVoiceDurationMs;
 constexpr std::size_t kMaxSamples =
     static_cast<std::size_t>(kMaxVoiceFrames) * kVoiceSamplesPerFrame;
 constexpr std::uint8_t kDefaultVolumePercent = 50;
+// 輸出停止後多久關掉功放。留一小段是為了讓「提示音 → 語音」這種連續輸出不必反覆
+// 開關 I2S；再長就等於一直供電，正是電流聲的來源。
+constexpr std::uint32_t kSpeakerIdleOffMs = 300;
+// I2S 剛啟動時 isPlaying() 可能還沒反映排入的資料，太早判定閒置會把聲音切掉。
+constexpr std::uint32_t kSpeakerMinOnMs = 120;
 
 }  // namespace
 
@@ -36,6 +41,12 @@ class AudioService::Impl {
   }
 
   bool begin() {
+    // M5.begin() 的 internal_spk/internal_mic 會讓功放與麥克風在開機後一直掛著，
+    // 靜止時仍在耗電並送出可聽見的底噪。這裡先全部關掉，之後只在真的要發聲或錄音
+    // 時才啟動，用完立刻關。
+    M5Cardputer.Speaker.end();
+    M5Cardputer.Mic.end();
+    speaker_active_ = false;
     applyVolume();
 #if CMT_CODEC2_AVAILABLE
     codec_ = codec2_create(CODEC2_MODE_700C);
@@ -65,12 +76,16 @@ class AudioService::Impl {
       return false;
     }
     M5Cardputer.Mic.end();
-    M5Cardputer.Speaker.begin();
-    M5Cardputer.Speaker.tone(1000, 200);
-    while (M5Cardputer.Speaker.isPlaying()) {
-      delay(1);
+    if (speakerOn()) {
+      M5Cardputer.Speaker.tone(1000, 200);
+      // 麥克風與喇叭共用音訊資源，提示音必須先放完才能切到錄音。
+      const std::uint32_t deadline = millis() + 500UL;
+      while (M5Cardputer.Speaker.isPlaying() &&
+             static_cast<std::int32_t>(millis() - deadline) < 0) {
+        delay(1);
+      }
     }
-    M5Cardputer.Speaker.end();
+    speakerOff();
     if (!M5Cardputer.Mic.begin()) {
       return false;
     }
@@ -172,12 +187,12 @@ class AudioService::Impl {
                     encoded.data() + frame * bytes_per_frame_);
     }
     M5Cardputer.Mic.end();
-    if (!M5Cardputer.Speaker.begin()) {
+    if (!speakerOn()) {
       return false;
     }
     if (!M5Cardputer.Speaker.playRaw(pcm_.data(), pcm_.size(), kSampleRate,
                                      false, 1, 0)) {
-      M5Cardputer.Speaker.end();
+      speakerOff();
       return false;
     }
     playing_ = true;
@@ -188,20 +203,66 @@ class AudioService::Impl {
 #endif
   }
 
+  bool playAlert(const AlertTone tone) {
+    if (recording_ || playing_) {
+      return false;
+    }
+    if (!speakerOn()) {
+      return false;
+    }
+    switch (tone) {
+      case AlertTone::Text:
+        M5Cardputer.Speaker.tone(2200, 90);
+        M5Cardputer.Speaker.tone(2900, 110);
+        break;
+      case AlertTone::Voice:
+        M5Cardputer.Speaker.tone(1500, 90);
+        M5Cardputer.Speaker.tone(1900, 90);
+        M5Cardputer.Speaker.tone(2400, 140);
+        break;
+      case AlertTone::Confirm:
+        M5Cardputer.Speaker.tone(2600, 60);
+        break;
+    }
+    return true;
+  }
+
   void update() {
     if (playing_ && !M5Cardputer.Speaker.isPlaying()) {
       playing_ = false;
-      M5Cardputer.Speaker.end();
     }
-    if (!recording_ && !playing_ && !pending_encoded_.empty()) {
+    if (!recording_ && !playing_ && !pending_encoded_.empty() &&
+        !M5Cardputer.Speaker.isPlaying()) {
       std::vector<std::uint8_t> pending = std::move(pending_encoded_);
       pending_encoded_.clear();
       startPlayback(pending);
+      return;
+    }
+    // 沒有東西在放就把功放關掉。這是「播過一次之後一直有電流聲」的修正點：
+    // 先前只有語音播放結束會 end()，提示音與其他路徑會讓 I2S 一直開著。
+    if (!speaker_active_) {
+      return;
+    }
+    const std::uint32_t now = millis();
+    if (M5Cardputer.Speaker.isPlaying()) {
+      speaker_idle_since_ms_ = 0;
+      return;
+    }
+    if (now - speaker_started_ms_ < kSpeakerMinOnMs) {
+      return;
+    }
+    if (speaker_idle_since_ms_ == 0U) {
+      speaker_idle_since_ms_ = now == 0U ? 1U : now;
+      return;
+    }
+    if (now - speaker_idle_since_ms_ >= kSpeakerIdleOffMs) {
+      speakerOff();
     }
   }
 
   bool available() const { return available_; }
   bool recording() const { return recording_; }
+  bool playing() const { return playing_; }
   float recordingProgress(const std::uint32_t now_ms) const {
     if (!recording_) {
       return 0.0F;
@@ -217,12 +278,41 @@ class AudioService::Impl {
     M5Cardputer.Speaker.setVolume(hardware_volume);
   }
 
+  // 唯一的功放開關入口，讓「開了就一定會關」這件事只有一處要維護。
+  bool speakerOn() {
+    if (speaker_active_) {
+      speaker_idle_since_ms_ = 0;
+      return true;
+    }
+    if (!M5Cardputer.Speaker.begin()) {
+      return false;
+    }
+    applyVolume();
+    speaker_active_ = true;
+    speaker_started_ms_ = millis();
+    speaker_idle_since_ms_ = 0;
+    return true;
+  }
+
+  void speakerOff() {
+    if (!speaker_active_) {
+      return;
+    }
+    M5Cardputer.Speaker.stop();
+    M5Cardputer.Speaker.end();
+    speaker_active_ = false;
+    speaker_idle_since_ms_ = 0;
+  }
+
 #if CMT_CODEC2_AVAILABLE
   CODEC2* codec_ = nullptr;
 #endif
   bool available_ = false;
   bool recording_ = false;
   bool playing_ = false;
+  bool speaker_active_ = false;
+  std::uint32_t speaker_started_ms_ = 0;
+  std::uint32_t speaker_idle_since_ms_ = 0;
   std::uint8_t volume_percent_ = kDefaultVolumePercent;
   std::uint32_t started_at_ms_ = 0;
   std::size_t samples_per_frame_ = 0;
@@ -250,6 +340,9 @@ bool AudioService::takeEncoded(std::vector<std::uint8_t>& encoded) {
 bool AudioService::playEncoded(const std::vector<std::uint8_t>& encoded) {
   return impl_->playEncoded(encoded);
 }
+bool AudioService::playAlert(const AlertTone tone) {
+  return impl_->playAlert(tone);
+}
 std::uint8_t AudioService::volumePercent() const {
   return impl_->volumePercent();
 }
@@ -258,6 +351,7 @@ std::uint8_t AudioService::adjustVolume(const int delta_percent) {
 }
 void AudioService::update() { impl_->update(); }
 bool AudioService::recording() const { return impl_->recording(); }
+bool AudioService::playing() const { return impl_->playing(); }
 float AudioService::recordingProgress(const std::uint32_t now_ms) const {
   return impl_->recordingProgress(now_ms);
 }

@@ -52,6 +52,8 @@ static_assert(kVoiceHeaderBytes + packedVoiceBytes(kMaxVoiceFrames) <=
                   kMaxFragmentPayloadBytes,
               "max voice message must fit in one fragment");
 
+// `point.valid` 同時是「有沒有定位」的旗標：v2 起 Beacon 在沒有 fix 時照樣發送，
+// 只是不帶座標。隊友名單因此不再依賴 GNSS，室內或收不到訊號也看得到彼此。
 struct BeaconMessage {
   GeoPoint point{};
   std::uint8_t battery_percent = 0;

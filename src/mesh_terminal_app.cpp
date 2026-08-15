@@ -9,11 +9,23 @@ namespace cmt {
 namespace {
 
 constexpr std::uint32_t kBeaconIntervalMs = 10UL * 60UL * 1000UL;
+// 收到沒見過的隊友時，把自己的下一次 Beacon 提前到這個範圍內（加隨機抖動避免
+// 兩機同時搶同一個時槽），彼此的位置才不用等滿十分鐘才對上。
+constexpr std::uint32_t kBeaconExpediteMinMs = 4000;
+constexpr std::uint32_t kBeaconExpediteJitterMs = 6000;
 constexpr std::size_t kMaxPeers = 12;
-constexpr std::size_t kMaxHistory = 32;
+constexpr std::size_t kMaxHistory = 60;
+constexpr std::size_t kMaxInbox = 16;
 constexpr std::uint16_t kNoticeGreen = 0x07E0;
 constexpr std::uint16_t kNoticeYellow = 0xFFE0;
 constexpr std::uint16_t kNoticeRed = 0xF800;
+
+std::string nodeLabel(const std::uint32_t node_id) {
+  char value[12]{};
+  std::snprintf(value, sizeof(value), "N%04lX",
+                static_cast<unsigned long>(node_id & 0xFFFFUL));
+  return value;
+}
 
 bool hasWordCharacter(const Keyboard_Class::KeysState& keys, const char value) {
   if (std::find(keys.word.begin(), keys.word.end(), value) != keys.word.end()) {
@@ -109,10 +121,16 @@ void MeshTerminalApp::setup() {
   device_state_.begin();
   nonce_generator_.begin(device_state_.nodeId());
   storage_.begin();
+  store_.begin();
   gnss_.begin();
   audio_.begin();
   // 音訊之後才要畫面緩衝：記憶體不夠時寧可畫面閃爍，也不要犧牲 Codec2 語音。
   ui_.enableFrameBuffer();
+  // 歷史存在 flash 的 logfs 分割區，重開機後照樣查得到，語音也還能重播。
+  loadHistoryFromStore();
+  if (!store_.ready()) {
+    addHistory("[系統] 歷史儲存區不可用，本次不保存紀錄");
+  }
 
   delay(350);
   // 第一步先問「這台機器是誰」，代號會進 Beacon 的 callsign，隊友才分得出來源。
@@ -189,6 +207,9 @@ void MeshTerminalApp::handleInput(const std::uint32_t now_ms) {
       break;
     case Screen::History:
       handleHistoryInput();
+      break;
+    case Screen::Inbox:
+      handleInboxInput();
       break;
     case Screen::Notice:
       handleNoticeInput();
@@ -269,10 +290,10 @@ void MeshTerminalApp::setAntennaConfirmed(const bool confirmed,
   radio_.setTransmitInhibited(!confirmed);
   if (confirmed) {
     next_beacon_ms_ = now_ms + 10000UL;
-    addHistory("[系統] 已確認天線，發射啟用");
+    recordSystem("[系統] 已確認天線，發射啟用");
   } else {
     next_beacon_ms_ = 0U;
-    addHistory("[系統] 未確認天線，僅接收不發射");
+    recordSystem("[系統] 未確認天線，僅接收不發射");
   }
   dirty_ = true;
 }
@@ -300,6 +321,11 @@ void MeshTerminalApp::handleHomeInput(const std::uint32_t now_ms,
   }
   if (isVolumeDown(keys)) {
     audio_.adjustVolume(-10);
+    dirty_ = true;
+    return;
+  }
+  if (keys.enter && !inbox_.empty()) {
+    screen_ = Screen::Inbox;
     dirty_ = true;
     return;
   }
@@ -451,6 +477,63 @@ void MeshTerminalApp::handleHistoryInput() {
     ++history_selected_;
     dirty_ = true;
   }
+  if (keys.enter && history_selected_ < history_.size()) {
+    const std::uint32_t clip_id = history_[history_selected_].clip_id;
+    if (clip_id == 0U) {
+      return;
+    }
+    if (!playClip(clip_id)) {
+      showNotice("語音", "音檔已不在儲存區或音訊忙碌", kNoticeYellow);
+    }
+  }
+}
+
+void MeshTerminalApp::handleInboxInput() {
+  auto& keys = M5Cardputer.Keyboard.keysState();
+  if (inbox_.empty()) {
+    screen_ = Screen::Home;
+    dirty_ = true;
+    return;
+  }
+  if (isEscape(keys)) {
+    // 稍後再看：留在未讀，主畫面的紅色提示不會消失。
+    screen_ = Screen::Home;
+    dirty_ = true;
+    return;
+  }
+
+  InboxItem& item = inbox_.front();
+  const bool is_voice = item.type == MessageType::Voice;
+  const bool playable =
+      is_voice && (item.clip_id != 0U || !item.frames.empty());
+
+  if (keys.enter) {
+    // 語音的第一次 Enter 是播放，不是關掉：使用者按下確認鍵才出聲，而且要能重播。
+    if (playable && !item.played) {
+      if (playInboxVoice(item)) {
+        item.played = true;
+      } else {
+        showNotice("語音", "音訊忙碌，稍後再按一次", kNoticeYellow);
+      }
+      dirty_ = true;
+      return;
+    }
+    inbox_.erase(inbox_.begin());
+    audio_.playAlert(AlertTone::Confirm);
+    if (inbox_.empty()) {
+      screen_ = Screen::Home;
+    }
+    dirty_ = true;
+    return;
+  }
+  if (keys.del && playable && !item.played) {
+    // 不想聽也要能清掉，否則未讀會永遠卡在第一則。
+    inbox_.erase(inbox_.begin());
+    if (inbox_.empty()) {
+      screen_ = Screen::Home;
+    }
+    dirty_ = true;
+  }
 }
 
 void MeshTerminalApp::handleNoticeInput() {
@@ -471,7 +554,7 @@ bool MeshTerminalApp::joinGroup() {
   pairing_error_.clear();
   const bool radio_ok = radio_.begin(group_);
   if (!radio_ok) {
-    addHistory("[系統] LoRa 初始化失敗，僅可離線操作");
+    recordSystem("[系統] LoRa 初始化失敗，僅可離線操作");
   }
   pin_.assign(4U, '\0');
   pin_.clear();
@@ -543,17 +626,19 @@ bool MeshTerminalApp::sendText(const std::string& text) {
       !sendPayload(MessageType::Text, payload)) {
     return false;
   }
-  addHistory("[我] " + text);
+  recordText(LogKind::Text, true, device_state_.callsign(), "[我] " + text,
+             text, device_state_.nodeId());
   return true;
 }
 
 bool MeshTerminalApp::sendBeacon() {
   const auto& fix = gnss_.snapshot();
-  if (!fix.point.valid) {
-    return false;
-  }
   BeaconMessage beacon{};
-  beacon.point = fix.point;
+  // 沒有 fix 也照樣廣播：Beacon 帶的是「我在這個群組、我還活著、電量多少」，
+  // 座標只是其中一欄。先前沒定位就整個不發，隊友名單因此永遠是空的。
+  if (fix.point.valid) {
+    beacon.point = fix.point;
+  }
   const int battery = M5Cardputer.Power.getBatteryLevel();
   beacon.battery_percent = static_cast<std::uint8_t>(
       battery < 0 ? 0 : std::min(100, battery));
@@ -568,8 +653,14 @@ bool MeshTerminalApp::sendVoice(
   VoiceMessage voice{};
   voice.frames = encoded;
   std::vector<std::uint8_t> payload;
-  return encodeVoiceMessage(voice, payload) &&
-         sendPayload(MessageType::Voice, payload);
+  if (!encodeVoiceMessage(voice, payload) ||
+      !sendPayload(MessageType::Voice, payload)) {
+    return false;
+  }
+  // 自己送出的語音也留檔，之後可以在歷史裡重播確認當時說了什麼。
+  recordVoice(true, device_state_.callsign(), "[我] 語音", encoded,
+              device_state_.nodeId());
+  return true;
 }
 
 void MeshTerminalApp::handleRadio(const std::uint32_t now_ms) {
@@ -620,52 +711,78 @@ void MeshTerminalApp::handleDecodedMessage(const ReassemblyResult& result,
     for (std::uint32_t offset = 0; offset < count; ++offset) {
       PacketHeader missing_header = result.header;
       missing_header.sequence = observation.first_missing + offset;
-      addHistory("[漏訊 " + sequenceLabel(missing_header) + "]");
+      recordSystem("[漏訊 " + sequenceLabel(missing_header) + "]");
     }
   }
 
+  // 任何通過認證的封包都足以證明對方在線。隊友名單因此不再依賴 Beacon，
+  // 也不依賴任何一方有沒有 GNSS 定位。
+  const bool first_contact =
+      std::find_if(peers_.begin(), peers_.end(),
+                   [&result](const PeerState& item) {
+                     return item.node_id == result.header.source_id;
+                   }) == peers_.end();
+  PeerState& peer = touchPeer(result.header.source_id, rssi_dbm, now_ms);
+  if (first_contact) {
+    recordSystem("[系統] 隊友上線 " + peerName(result.header.source_id));
+    expediteBeacon(now_ms);
+  }
+  dirty_ = true;
+
   if (result.header.type == MessageType::Text) {
     std::string text;
-    if (decodeTextMessage(result.message, text)) {
-      char source[12]{};
-      std::snprintf(source, sizeof(source), "N%04lX",
-                    static_cast<unsigned long>(result.header.source_id &
-                                               0xFFFFUL));
-      addHistory(std::string("[") + source + " " +
-                 sequenceLabel(result.header) + "] " + text);
-      dirty_ = true;
+    if (!decodeTextMessage(result.message, text)) {
+      return;
     }
+    const std::string sender = peerName(result.header.source_id);
+    const std::string label = sequenceLabel(result.header);
+    recordText(LogKind::Text, false, sender,
+               "[" + sender + " " + label + "] " + text, text,
+               result.header.source_id);
+
+    InboxItem item{};
+    item.type = MessageType::Text;
+    item.source_id = result.header.source_id;
+    item.sender = sender;
+    item.label = label;
+    item.text = text;
+    enqueueInbox(std::move(item));
+    audio_.playAlert(AlertTone::Text);
   } else if (result.header.type == MessageType::Beacon) {
     BeaconMessage beacon{};
     if (!decodeBeaconMessage(result.message, beacon)) {
       return;
     }
-    auto peer = std::find_if(peers_.begin(), peers_.end(),
-                             [&result](const PeerState& item) {
-                               return item.node_id == result.header.source_id;
-                             });
-    if (peer == peers_.end()) {
-      if (peers_.size() >= kMaxPeers) {
-        peers_.erase(peers_.begin());
-      }
-      peers_.push_back(PeerState{});
-      peer = peers_.end() - 1;
-      peer->node_id = result.header.source_id;
-    }
-    peer->beacon = std::move(beacon);
-    peer->last_seen_ms = now_ms;
-    peer->rssi_dbm = rssi_dbm;
-    dirty_ = true;
+    peer.callsign = std::move(beacon.callsign);
+    peer.position = beacon.point;
+    peer.battery_percent = beacon.battery_percent;
+    peer.had_beacon = true;
   } else if (result.header.type == MessageType::Voice) {
     VoiceMessage voice{};
     if (!decodeVoiceMessage(result.message, voice)) {
-      addHistory("[語音] 格式錯誤，已捨棄");
-    } else if (!audio_.playEncoded(voice.frames)) {
-      addHistory("[語音] 音訊忙碌或解碼器不可用");
-    } else {
-      addHistory("[語音] " + sequenceLabel(result.header));
+      recordSystem("[語音] 格式錯誤，已捨棄");
+      return;
     }
-    dirty_ = true;
+    // 收到就播會讓使用者錯過整段語音（人不一定在看機器）。改成先存檔、發提示音，
+    // 等使用者按確認鍵才播，而且之後隨時能從歷史重播。
+    const std::string sender = peerName(result.header.source_id);
+    const std::string label = sequenceLabel(result.header);
+    const std::uint32_t clip_id =
+        recordVoice(false, sender, "[" + sender + " " + label + "] 語音",
+                    voice.frames, result.header.source_id);
+
+    InboxItem item{};
+    item.type = MessageType::Voice;
+    item.source_id = result.header.source_id;
+    item.sender = sender;
+    item.label = label;
+    item.clip_id = clip_id;
+    if (clip_id == 0U) {
+      // 存不下就把音訊留在這一則裡：至少聽得到，只是關掉之後無法重播。
+      item.frames = std::move(voice.frames);
+    }
+    enqueueInbox(std::move(item));
+    audio_.playAlert(AlertTone::Voice);
   }
 }
 
@@ -685,12 +802,142 @@ void MeshTerminalApp::updateTrackAndBeacon(const std::uint32_t now_ms) {
   reassembler_.expire(now_ms);
 }
 
-void MeshTerminalApp::addHistory(const std::string& entry) {
+MeshTerminalApp::PeerState& MeshTerminalApp::touchPeer(
+    const std::uint32_t node_id, const float rssi_dbm,
+    const std::uint32_t now_ms) {
+  auto peer = std::find_if(
+      peers_.begin(), peers_.end(),
+      [node_id](const PeerState& item) { return item.node_id == node_id; });
+  if (peer == peers_.end()) {
+    if (peers_.size() >= kMaxPeers) {
+      // 淘汰最久沒出現的那一位，而不是最早加入的：長時間同行的隊友不該被
+      // 一個路過的中繼節點擠掉。
+      peer = std::min_element(peers_.begin(), peers_.end(),
+                              [](const PeerState& a, const PeerState& b) {
+                                return a.last_seen_ms < b.last_seen_ms;
+                              });
+      *peer = PeerState{};
+    } else {
+      peers_.push_back(PeerState{});
+      peer = peers_.end() - 1;
+    }
+    peer->node_id = node_id;
+  }
+  peer->last_seen_ms = now_ms;
+  peer->rssi_dbm = rssi_dbm;
+  return *peer;
+}
+
+std::string MeshTerminalApp::peerName(const std::uint32_t node_id) const {
+  const auto peer = std::find_if(
+      peers_.begin(), peers_.end(),
+      [node_id](const PeerState& item) { return item.node_id == node_id; });
+  if (peer != peers_.end() && !peer->callsign.empty()) {
+    return peer->callsign;
+  }
+  return nodeLabel(node_id);
+}
+
+void MeshTerminalApp::expediteBeacon(const std::uint32_t now_ms) {
+  if (!antenna_confirmed_) {
+    return;
+  }
+  const std::uint32_t soon =
+      now_ms + kBeaconExpediteMinMs +
+      (device_state_.nodeId() % kBeaconExpediteJitterMs);
+  if (next_beacon_ms_ == 0U ||
+      static_cast<std::int32_t>(soon - next_beacon_ms_) < 0) {
+    next_beacon_ms_ = soon;
+  }
+}
+
+void MeshTerminalApp::addHistory(const std::string& entry,
+                                 const std::uint32_t clip_id) {
   if (history_.size() >= kMaxHistory) {
     history_.erase(history_.begin());
   }
-  history_.push_back(entry);
+  history_.push_back(HistoryEntry{entry, clip_id});
   history_selected_ = history_.size() - 1U;
+}
+
+void MeshTerminalApp::recordSystem(const std::string& entry) {
+  addHistory(entry);
+  store_.appendText(LogKind::System, false, std::string(), entry, 0U,
+                    gnss_.snapshot().unix_time);
+}
+
+void MeshTerminalApp::recordText(const LogKind kind, const bool outgoing,
+                                 const std::string& sender,
+                                 const std::string& display_text,
+                                 const std::string& body,
+                                 const std::uint32_t source_id) {
+  addHistory(display_text);
+  store_.appendText(kind, outgoing, sender, body, source_id,
+                    gnss_.snapshot().unix_time);
+}
+
+std::uint32_t MeshTerminalApp::recordVoice(
+    const bool outgoing, const std::string& sender,
+    const std::string& display_text, const std::vector<std::uint8_t>& frames,
+    const std::uint32_t source_id) {
+  std::uint32_t clip_id = 0;
+  store_.appendVoice(outgoing, sender, display_text, frames, source_id,
+                     gnss_.snapshot().unix_time, clip_id);
+  addHistory(display_text, clip_id);
+  return clip_id;
+}
+
+void MeshTerminalApp::loadHistoryFromStore() {
+  const std::vector<LogRecord> records = store_.loadRecent(kMaxHistory);
+  history_.clear();
+  history_.reserve(records.size());
+  for (const LogRecord& record : records) {
+    HistoryEntry entry{};
+    // 音檔可能已被空間回收刪掉，紀錄還在但不再可重播。
+    entry.clip_id = store_.hasClip(record.clip_id) ? record.clip_id : 0U;
+    const std::string who =
+        record.outgoing ? std::string("我")
+                        : (record.sender.empty() ? nodeLabel(record.source_id)
+                                                 : record.sender);
+    if (record.kind == LogKind::System) {
+      entry.text = record.text;
+    } else if (record.kind == LogKind::Voice) {
+      entry.text = "[" + who + "] 語音";
+    } else {
+      entry.text = "[" + who + "] " + record.text;
+    }
+    history_.push_back(std::move(entry));
+  }
+  history_selected_ = history_.empty() ? 0U : history_.size() - 1U;
+}
+
+void MeshTerminalApp::enqueueInbox(InboxItem item) {
+  if (inbox_.size() >= kMaxInbox) {
+    // 未讀滿了就丟最舊的一則。紀錄仍在歷史裡，不會真的消失。
+    inbox_.erase(inbox_.begin());
+  }
+  inbox_.push_back(std::move(item));
+  // 使用者正停在主畫面時直接把訊息推到眼前；正在打字或操作選單時不打斷，
+  // 靠主畫面的未讀提示與提示音即可。
+  if (screen_ == Screen::Home) {
+    screen_ = Screen::Inbox;
+  }
+  dirty_ = true;
+}
+
+bool MeshTerminalApp::playClip(const std::uint32_t clip_id) {
+  std::vector<std::uint8_t> frames;
+  if (!store_.loadClip(clip_id, frames)) {
+    return false;
+  }
+  return audio_.playEncoded(frames);
+}
+
+bool MeshTerminalApp::playInboxVoice(const InboxItem& item) {
+  if (item.clip_id != 0U) {
+    return playClip(item.clip_id);
+  }
+  return !item.frames.empty() && audio_.playEncoded(item.frames);
 }
 
 void MeshTerminalApp::showNotice(const std::string& title,
@@ -714,23 +961,57 @@ UiHomeModel MeshTerminalApp::buildHomeModel(
   model.sd_ready = storage_.ready();
   model.voice_ready = audio_.available();
   model.volume_percent = audio_.volumePercent();
-  model.satellites = gnss_.snapshot().satellites;
-  model.own_position = gnss_.snapshot().point;
+  const GnssSnapshot& fix = gnss_.snapshot();
+  model.satellites = fix.satellites;
+  model.satellites_in_view = fix.satellites_in_view;
+  model.gnss_link = fix.link;
+  model.own_position = fix.point;
   model.track = storage_.track();
   model.tx_queued = radio_.queuedCount();
   model.tx_inhibited = radio_.transmitInhibited();
+  model.unread_count = inbox_.size();
   model.selected_peer = peer_selected_;
   model.peers.reserve(peers_.size());
   for (const auto& peer : peers_) {
     UiPeer view{};
-    view.callsign = peer.beacon.callsign;
-    view.relative =
-        relativePosition(model.own_position, peer.beacon.point);
-    view.battery_percent = peer.beacon.battery_percent;
+    view.callsign =
+        peer.callsign.empty() ? nodeLabel(peer.node_id) : peer.callsign;
+    view.relative = relativePosition(model.own_position, peer.position);
+    view.battery_percent = peer.battery_percent;
     view.age_seconds = (now_ms - peer.last_seen_ms) / 1000UL;
     view.rssi_dbm = peer.rssi_dbm;
+    view.has_position = peer.position.valid;
     model.peers.push_back(std::move(view));
   }
+  return model;
+}
+
+std::vector<UiHistoryEntry> MeshTerminalApp::buildHistoryModel() const {
+  std::vector<UiHistoryEntry> model;
+  model.reserve(history_.size());
+  for (const HistoryEntry& entry : history_) {
+    model.push_back(UiHistoryEntry{entry.text, entry.clip_id != 0U});
+  }
+  return model;
+}
+
+UiInboxItem MeshTerminalApp::buildInboxModel() const {
+  UiInboxItem model{};
+  if (inbox_.empty()) {
+    return model;
+  }
+  const InboxItem& item = inbox_.front();
+  model.sender = item.sender;
+  model.label = item.label;
+  model.text = item.text;
+  model.is_voice = item.type == MessageType::Voice;
+  model.played = item.played;
+  // 未讀期間音檔可能已被空間回收淘汰，要真的問儲存區，不能只看 id 有沒有值，
+  // 否則畫面會顯示「按 Enter 播放」卻永遠播不出來。
+  model.clip_available =
+      !item.frames.empty() || store_.hasClip(item.clip_id);
+  model.index = 0;
+  model.total = inbox_.size();
   return model;
 }
 
@@ -771,10 +1052,13 @@ void MeshTerminalApp::render(const std::uint32_t now_ms, const bool force) {
       ui_.renderTextInput(text_input_);
       break;
     case Screen::History:
-      ui_.renderHistory(history_, history_selected_);
+      ui_.renderHistory(buildHistoryModel(), history_selected_);
       break;
     case Screen::Recording:
       ui_.renderRecording(audio_.recordingProgress(now_ms));
+      break;
+    case Screen::Inbox:
+      ui_.renderInbox(buildInboxModel());
       break;
     case Screen::Notice:
       ui_.renderNotice(notice_title_, notice_message_, notice_color_);

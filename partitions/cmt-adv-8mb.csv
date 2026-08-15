@@ -1,0 +1,19 @@
+# Cardputer Adv 8 MB flash layout.
+#
+# ASCII only: PlatformIO reads this file with the host codepage, so non-ASCII
+# comments break the build on non-UTF-8 Windows locales.
+#
+# The firmware is flashed over USB and never does OTA, so the second app slot
+# from default_8MB.csv is dropped and the space goes to logfs, which holds the
+# message and voice history for a whole trip.
+#
+# App measures ~1.2 MB, so 3 MB leaves more than 2x headroom. logfs at 4.9 MB
+# stores roughly 20000 clips of 2.2 s voice; in practice the user runs out of
+# patience before the partition runs out of room.
+#
+# Name,     Type, SubType,  Offset,    Size,      Flags
+nvs,        data, nvs,      0x9000,    0x5000,
+phy_init,   data, phy,      0xE000,    0x1000,
+factory,    app,  factory,  0x10000,   0x300000,
+logfs,      data, spiffs,   0x310000,  0x4E0000,
+coredump,   data, coredump, 0x7F0000,  0x10000,

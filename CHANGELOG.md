@@ -17,14 +17,28 @@
 - 天線安全閘：配對後強制天線確認，未確認時停用文字、罐頭訊息、語音、Beacon 與 Mesh 中繼的所有發射，接收不受影響。主畫面 `A` 可重新確認，並顯示紅色警示列與 LoRa 模組偵測結果。
 - `deploy\flash-dev.cmd`：從原始碼建置並燒錄的開發用入口，自動選取 Espressif COM 埠。
 
+- 來訊提示：收到文字或語音會發出可分辨的提示音（文字兩聲上行、語音三聲上行），停在主畫面時直接跳出來訊畫面，主畫面下緣顯示紅色未讀計數。多則訊息必須逐則按 Enter 確認（ADR-009）。
+- 訊息與語音歷史持久化：新增 4.9 MB 的 `logfs` flash 分割（`partitions/cmt-adv-8mb.csv`），文字寫 `/msg.log`、語音寫 `/v/<clip>.c2`，重開機後歷史仍在，語音可在歷史紀錄按 Enter 重播（ADR-008）。
+- GNSS 診斷：主畫面右欄改為 `G <定位數>/<可見數>`，並以綠／黃／紅區分「已定位」「收到 NMEA 但無 fix」「收不到 NMEA」。沒有隊友時直接顯示 GNSS 狀態。
+
 ### Changed
 
+- **Beacon 升到 v2，與 v1 不相容，兩台裝置都必須重新燒錄**（ADR-007）。新增 `flags` 欄位（bit0 = has_fix），沒有 GNSS fix 時照樣廣播身分與電量，座標欄位為零。
+- 隊友名單改由任何通過認證的封包建立，不再只靠 Beacon；收到沒見過的隊友時把自己的下一次 Beacon 提前 4–10 s，位置不必等滿十分鐘才對上。主畫面顯示隊友代號、序號與「多久前聽到」，並分辨「對方無定位」與「本機無定位」。
+- 收到語音改為**不自動播放**：先存檔並發提示音，使用者按 Enter 才播放，之後可從歷史重播（ADR-009）。
+- 分割表由 `default_8MB.csv` 改為 `partitions/cmt-adv-8mb.csv`，移除未使用的 OTA 第二 app 槽；app 分割由 3.3 MB 縮為 3 MB（目前用量 1.19 MB）。
 - 選單、歷史與主畫面的方向鍵與 `Esc` 改為單按即可，不再需要 `Fn` 組合鍵。自由訊息輸入頁維持 `Fn` + `Esc`，因為該頁的 `` ` `` 是可輸入字元。
 - 群組 PIN 輸入改為明碼顯示，不再遮成 `*`。4 位 PIN 的安全目標只有群組辨識與基本內容遮蔽，遮蔽擋不住實際威脅，卻讓使用者看不出按錯哪一位。
 - README 新增「主畫面欄位對照」表，說明標題列 `B`＝電量、`L`＝音量、`G`＝群組 id，以及右欄 `R`/`S`/`V`/`Q` 等縮寫。
 
 ### Fixed
 
+- 主畫面永遠顯示「尚無隊友」，即使兩台已配對且互相收得到封包。`sendBeacon()` 在沒有 GNSS fix 時直接放棄，而隊友名單只由 Beacon 建立——室內、峽谷與冷啟動這些最需要確認隊友在不在的情境，正好都沒有 fix。改為沒有 fix 也廣播帶旗標的 Beacon，並讓任何通過認證的封包都能建立隊友。
+- 收到訊息完全沒有任何提示，必須自己去翻歷史紀錄才會發現。改為提示音加畫面來訊提示與未讀計數。
+- 喇叭播過一次之後持續開啟並發出電流聲。`M5.begin()` 的 `internal_spk` 會讓功放常駐，而先前只有語音播放結束的那一條路徑會 `Speaker.end()`。改為開機即關閉功放，統一由 `speakerOn()`／`speakerOff()` 管理生命週期，輸出停止 300 ms 後自動關閉。
+- 收到的語音無法再次播放：播完即丟，沒有任何保存。改為先寫入 `logfs` 再等使用者確認播放，歷史紀錄中以 `▶` 標示可重播。
+- 歷史紀錄在重開機後全部消失，且只保留 RAM 中的 32 筆。
+- 歷史與來訊畫面以位元組截斷中文字串，會截在 UTF-8 多位元組序列中間而顯示亂碼方塊。改為以字元邊界與顯示寬度截斷／換行。
 - 畫面持續閃爍。每次更新都直接對面板 `fillScreen()` 再逐項重畫，而且主畫面每 500 ms 無條件重畫一次，肉眼會看到「整頁變黑 → 內容浮現」。改為畫進 240x135x16bpp 的離螢幕緩衝後一次 `pushSprite()`，並讓週期重畫降到 1 s、只在內容變更（`dirty_`）時才提前重畫、最短間隔 50 ms。緩衝在音訊初始化之後才配置，記憶體不足時退回直接繪製，不影響 Codec2。
 - 開機即 `loopTask` stack overflow 無限重啟。Codec2 MODE_1300 在 loopTask 上的峰值堆疊用量實測為 18,184 bytes，超過 Arduino 預設的 8 KB，`codec2_create()` 當場觸發 panic。改以 `SET_LOOP_TASK_STACK_SIZE(32768)` 配置。
 - `tools\pio.cmd` 在長路徑下會讓編譯命令列超過 Windows 32767 字元上限，造成 `xtensa-esp32s3-elf-g++: error: CreateProcess: No such file or directory`。核心目錄解析改為：顯式 `PLATFORMIO_CORE_DIR` 優先，其次既存的 repo-local `.platformio`，否則使用 PlatformIO 預設位置。
@@ -33,6 +47,8 @@
 
 ### Verification status
 
+- **本次修正（Beacon v2、來訊提示、logfs 歷史、喇叭電源、GNSS 診斷）僅通過 native core tests（10/10）與 `cardputer-adv` clean build，尚未在實機驗證。** 需要兩台裝置實測的項目：隊友出現在名單、提示音與逐則確認、語音重播、喇叭底噪消失、GNSS 狀態指示是否正確反映室內/室外。
+- 分割表已變更，升級必須整片抹除後燒錄（`deploy\flash-dev.cmd -EraseAll`），否則 `logfs` 不存在、歷史會降級為 RAM-only。
 - 已在單機實測：建置、燒錄（COM3、hash verified）與開機流程；離螢幕緩衝配置成功，畫面閃爍經實機確認已消除。
 - **語音錄音鏈路已在實機驗證**：`codec2_create(CODEC2_MODE_700C)` 配置成功（狀態列 `V:Y`），未重演 MODE_1300 的 loopTask 堆疊溢位；連續兩次 PTT 分別擷取 46 與 55 幀（後者錄滿 2.2 秒緩衝上限），`M5Cardputer.Mic.record()` 失敗 0 次，麥克風／喇叭資源切換正常。
 - 語音編碼與 wire format 已用真實錄音（2.82 秒人聲）在主機端驗證：走過 `encodeVoiceMessage()`／`decodeVoiceMessage()` 後位元流完全一致，2.2 秒段落為 196 bytes、單一 fragment。

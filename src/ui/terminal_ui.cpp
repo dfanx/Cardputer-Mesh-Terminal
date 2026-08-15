@@ -14,6 +14,7 @@ constexpr std::uint16_t kBlue = 0x041F;
 constexpr std::uint16_t kGreen = 0x07E0;
 constexpr std::uint16_t kYellow = 0xFFE0;
 constexpr std::uint16_t kRed = 0xF800;
+constexpr std::uint16_t kOrange = 0xFC00;
 constexpr std::uint16_t kWhite = 0xFFFF;
 constexpr std::uint16_t kMuted = 0x8410;
 
@@ -34,6 +35,64 @@ lgfx::LovyanGFX& gfx() {
 void endFrame() {
   if (g_buffered) {
     g_canvas.pushSprite(&M5Cardputer.Display, 0, 0);
+  }
+}
+
+// efontTW_12 下 ASCII 約 6 px、CJK 約 12 px。文字含中文時不能用位元組數當寬度，
+// 也不能從位元組中間截斷，否則畫面會出現亂碼方塊。
+int glyphWidth(const unsigned char lead) {
+  return lead >= 0xE0U ? 12 : 6;
+}
+
+std::size_t sequenceBytes(const unsigned char lead) {
+  if (lead < 0x80U) {
+    return 1U;
+  }
+  if (lead >= 0xF0U) {
+    return 4U;
+  }
+  if (lead >= 0xE0U) {
+    return 3U;
+  }
+  if (lead >= 0xC0U) {
+    return 2U;
+  }
+  return 1U;  // 落單的接續位元組，當成單一字元跳過
+}
+
+// 回傳從 `start` 起、寬度不超過 max_width_px 的位元組數，永遠停在字元邊界上。
+std::size_t bytesWithinWidth(const std::string& text, const std::size_t start,
+                             const int max_width_px) {
+  int width = 0;
+  std::size_t index = start;
+  while (index < text.size()) {
+    const auto lead = static_cast<unsigned char>(text[index]);
+    const int advance = glyphWidth(lead);
+    if (width + advance > max_width_px) {
+      break;
+    }
+    width += advance;
+    index += std::min(sequenceBytes(lead), text.size() - index);
+  }
+  return index - start;
+}
+
+std::string clipToWidth(const std::string& text, const int max_width_px) {
+  const std::size_t bytes = bytesWithinWidth(text, 0U, max_width_px);
+  return bytes >= text.size() ? text : text.substr(0U, bytes);
+}
+
+// Beacon 每 10 分鐘一次，所以隊友的位置本來就會是舊的。畫面上必須看得出來有多舊，
+// 否則使用者會把半小時前的方位當成現在的方位。
+void formatAge(const std::uint32_t seconds, char* out, const std::size_t size) {
+  if (seconds < 60UL) {
+    std::snprintf(out, size, "%us", static_cast<unsigned>(seconds));
+  } else if (seconds < 3600UL) {
+    std::snprintf(out, size, "%um", static_cast<unsigned>(seconds / 60UL));
+  } else if (seconds < 86400UL) {
+    std::snprintf(out, size, "%uh", static_cast<unsigned>(seconds / 3600UL));
+  } else {
+    std::snprintf(out, size, ">1d");
   }
 }
 
@@ -216,10 +275,38 @@ void TerminalUi::drawTrack(const std::vector<GeoPoint>& track, const int x,
   display.fillCircle(previous_x, previous_y, 2, kYellow);
 }
 
-void TerminalUi::drawHomeHints(const bool tx_inhibited) {
+void TerminalUi::drawWrapped(const std::string& text, const int x, const int y,
+                             const int line_height, const int max_width_px,
+                             const int max_lines) {
   auto& display = gfx();
-  // 主畫面下緣固定保留兩行快速鍵，讓使用者不必翻說明就知道能按什麼。
-  if (tx_inhibited) {
+  std::size_t offset = 0;
+  for (int line = 0; line < max_lines && offset < text.size(); ++line) {
+    std::size_t bytes = bytesWithinWidth(text, offset, max_width_px);
+    if (bytes == 0U) {
+      break;
+    }
+    display.setCursor(x, y + line * line_height);
+    display.print(text.substr(offset, bytes).c_str());
+    offset += bytes;
+  }
+}
+
+void TerminalUi::drawHomeHints(const UiHomeModel& model) {
+  auto& display = gfx();
+  // 主畫面下緣固定保留兩行。第一行讓給當下最該被看到的事：未讀優先於天線警告，
+  // 因為未讀是需要立刻操作的，天線狀態在雷達區也看得到。
+  if (model.unread_count > 0U) {
+    display.fillRect(0, 100, display.width(), 17, kRed);
+    display.setTextColor(kWhite, kRed);
+    display.setCursor(4, 102);
+    display.printf("● %u 則未讀  Enter 讀取",
+                   static_cast<unsigned>(model.unread_count));
+    display.fillRect(0, 117, display.width(), 18, kPanel);
+    display.setTextColor(kWhite, kPanel);
+    display.setCursor(4, 119);
+    display.print(model.tx_inhibited ? "無天線！A=確認  ↑=歷史"
+                                     : "T=訊息 ↑=歷史 SPACE=語音");
+  } else if (model.tx_inhibited) {
     display.fillRect(0, 100, display.width(), 17, kRed);
     display.setTextColor(kWhite, kRed);
     display.setCursor(4, 102);
@@ -256,10 +343,18 @@ void TerminalUi::renderHome(const UiHomeModel& model) {
   }
 
   drawTrack(model.track, 2, 21, 145, 77);
-  display.setTextColor(kWhite, kBackground);
+  // GPS 只顯示一個 0 沒辦法判斷該走到室外還是該檢查模組，所以定位數/可見數與
+  // 鏈路狀態一起給。
+  const bool gnss_alive = model.gnss_link == GnssLink::Fixed ||
+                          model.gnss_link == GnssLink::NoFix;
+  display.setTextColor(model.gnss_link == GnssLink::Fixed ? kGreen
+                       : gnss_alive                       ? kYellow
+                                                          : kRed,
+                       kBackground);
   display.setCursor(151, 23);
-  display.printf("GPS %u Q:%u", model.satellites,
+  display.printf("G %u/%u Q%u", model.satellites, model.satellites_in_view,
                  static_cast<unsigned>(model.tx_queued));
+  display.setTextColor(kWhite, kBackground);
   display.setCursor(151, 39);
   display.printf("%.3fM", model.frequency_mhz);
   display.setCursor(151, 55);
@@ -269,23 +364,37 @@ void TerminalUi::renderHome(const UiHomeModel& model) {
   if (!model.peers.empty()) {
     const UiPeer& peer =
         model.peers[model.selected_peer % model.peers.size()];
+    char age[8]{};
+    formatAge(peer.age_seconds, age, sizeof(age));
     display.setTextColor(kYellow, kBackground);
     display.setCursor(151, 71);
-    display.print(peer.callsign.c_str());
+    // 代號與「多久前聽到」放同一行，位置有沒有解出來都看得到隊友的時效。
+    display.printf("%u/%u %s %s",
+                   static_cast<unsigned>(
+                       (model.selected_peer % model.peers.size()) + 1U),
+                   static_cast<unsigned>(model.peers.size()),
+                   clipToWidth(peer.callsign, 36).c_str(), age);
     display.setCursor(151, 87);
     if (peer.relative.valid) {
       display.printf("%s %.1fkm", peer.relative.direction,
                      peer.relative.distance_m / 1000.0);
+    } else if (!peer.has_position) {
+      // 隊友自己回報沒有定位，跟「我方沒定位所以算不出相對位置」是兩件事。
+      display.print("對方無定位");
+    } else if (!model.own_position.valid) {
+      display.print("本機無定位");
     } else {
       display.print("位置未知");
     }
   } else {
     display.setTextColor(kMuted, kBackground);
-    display.setCursor(151, 79);
+    display.setCursor(151, 71);
     display.print("尚無隊友");
+    display.setCursor(151, 87);
+    display.print(gnss_alive ? gnssLinkLabel(model.gnss_link) : "檢查 GNSS");
   }
 
-  drawHomeHints(model.tx_inhibited);
+  drawHomeHints(model);
   endFrame();
 }
 
@@ -349,10 +458,11 @@ void TerminalUi::renderRecording(const float progress) {
   endFrame();
 }
 
-void TerminalUi::renderHistory(const std::vector<std::string>& history,
+void TerminalUi::renderHistory(const std::vector<UiHistoryEntry>& history,
                                const std::size_t selected) {
   header("訊息歷史", kBlue);
   auto& display = gfx();
+  bool selected_has_clip = false;
   if (history.empty()) {
     display.setTextColor(kMuted, kBackground);
     display.setCursor(74, 62);
@@ -360,19 +470,70 @@ void TerminalUi::renderHistory(const std::vector<std::string>& history,
   } else {
     const std::size_t first = selected > 4U ? selected - 4U : 0U;
     const std::size_t last = std::min(history.size(), first + 5U);
+    selected_has_clip =
+        selected < history.size() && history[selected].has_clip;
     for (std::size_t index = first; index < last; ++index) {
       const int y = 22 + static_cast<int>(index - first) * 19;
-      display.setTextColor(index == selected ? kYellow : kWhite, kBackground);
-      display.setCursor(4, y);
-      const std::string visible =
-          history[index].size() > 34U ? history[index].substr(0, 34U)
-                                      : history[index];
-      display.print(visible.c_str());
+      const bool active = index == selected;
+      display.setTextColor(active ? kYellow : kWhite, kBackground);
+      if (history[index].has_clip) {
+        // 有音檔的那幾筆要一眼看得出來可以重播。
+        display.setTextColor(active ? kYellow : kGreen, kBackground);
+        display.setCursor(4, y);
+        display.print("▶");
+        display.setCursor(16, y);
+      } else {
+        display.setCursor(4, y);
+      }
+      display.print(clipToWidth(history[index].text,
+                                history[index].has_clip ? 220 : 232)
+                        .c_str());
     }
   }
   display.setTextColor(kMuted, kBackground);
   display.setCursor(4, 120);
-  display.print("↑↓ 瀏覽 / Esc 返回");
+  display.print(selected_has_clip ? "↑↓ 瀏覽  Enter 重播  Esc 返回"
+                                  : "↑↓ 瀏覽 / Esc 返回");
+  endFrame();
+}
+
+void TerminalUi::renderInbox(const UiInboxItem& item) {
+  header(item.is_voice ? "收到語音" : "收到訊息",
+         item.is_voice ? kOrange : kBlue);
+  auto& display = gfx();
+  display.setTextColor(kMuted, kBackground);
+  display.setCursor(5, 24);
+  display.printf("%u/%u  %s  %s", static_cast<unsigned>(item.index + 1U),
+                 static_cast<unsigned>(item.total),
+                 clipToWidth(item.sender, 84).c_str(), item.label.c_str());
+
+  display.setTextColor(kWhite, kBackground);
+  if (item.is_voice) {
+    display.setCursor(5, 48);
+    if (!item.clip_available) {
+      display.setTextColor(kRed, kBackground);
+      display.print("語音已不在儲存區");
+    } else if (item.played) {
+      display.print("已播放");
+      display.setTextColor(kMuted, kBackground);
+      display.setCursor(5, 68);
+      display.print("之後可在歷史紀錄重播");
+    } else {
+      display.print("按 Enter 播放");
+    }
+  } else {
+    drawWrapped(item.text, 5, 44, 17, 230, 4);
+  }
+
+  display.fillRect(0, 117, display.width(), 18, kPanel);
+  display.setTextColor(kWhite, kPanel);
+  display.setCursor(4, 119);
+  if (item.is_voice && item.clip_available && !item.played) {
+    display.print("Enter=播放  Esc=稍後  Del=標記已讀");
+  } else {
+    display.print("Enter=已讀下一則  Esc=稍後");
+  }
+  display.setTextColor(kWhite, kBackground);
   endFrame();
 }
 

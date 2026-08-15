@@ -280,6 +280,7 @@ void test_beacon_text_and_geo_round_trip() {
                            static_cast<float>(original.point.longitude),
                            static_cast<float>(decoded.point.longitude));
   TEST_ASSERT_EQUAL_INT16(120, decoded.point.altitude_m);
+  TEST_ASSERT_TRUE(decoded.point.valid);
   TEST_ASSERT_EQUAL_UINT8(87, decoded.battery_percent);
   TEST_ASSERT_EQUAL_STRING("A-01", decoded.callsign.c_str());
 
@@ -300,6 +301,55 @@ void test_beacon_text_and_geo_round_trip() {
                               static_cast<float>(relative.distance_m));
   TEST_ASSERT_EQUAL_INT16(30, relative.altitude_delta_m);
   TEST_ASSERT_EQUAL_STRING("E", relative.direction);
+}
+
+// 沒有 GNSS fix 時仍必須能廣播身分與電量，否則隊友名單在收訊不良或室內永遠是空的。
+// 同時要確保「沒有 fix」不會被解成 0/0 這個真實座標。
+void test_beacon_without_fix_still_announces_identity() {
+  cmt::BeaconMessage original{};
+  original.point.valid = false;
+  original.battery_percent = 64;
+  original.callsign = "B-02";
+
+  std::vector<std::uint8_t> encoded;
+  TEST_ASSERT_TRUE(cmt::encodeBeaconMessage(original, encoded));
+
+  cmt::BeaconMessage decoded{};
+  TEST_ASSERT_TRUE(cmt::decodeBeaconMessage(encoded, decoded));
+  TEST_ASSERT_FALSE(decoded.point.valid);
+  TEST_ASSERT_EQUAL_UINT8(64, decoded.battery_percent);
+  TEST_ASSERT_EQUAL_STRING("B-02", decoded.callsign.c_str());
+  TEST_ASSERT_EQUAL_FLOAT(0.0F, static_cast<float>(decoded.point.latitude));
+  TEST_ASSERT_EQUAL_FLOAT(0.0F, static_cast<float>(decoded.point.longitude));
+  TEST_ASSERT_EQUAL_INT16(0, decoded.point.altitude_m);
+
+  // no-fix 的封包不得夾帶座標：同一則 Beacon 只能有一種解讀。
+  auto smuggled = encoded;
+  smuggled[2] = 0x01U;
+  TEST_ASSERT_FALSE(cmt::decodeBeaconMessage(smuggled, decoded));
+
+  // 未定義的 flag bit 一律拒收，替後續版本保留擴充空間。
+  auto unknown_flag = encoded;
+  unknown_flag[1] = 0x02U;
+  TEST_ASSERT_FALSE(cmt::decodeBeaconMessage(unknown_flag, decoded));
+
+  // 宣告有 fix 卻帶不合法座標必須被擋下。
+  cmt::BeaconMessage bad{};
+  bad.point = {91.0, 0.0, 0, true};
+  bad.battery_percent = 10;
+  bad.callsign = "B-03";
+  TEST_ASSERT_FALSE(cmt::encodeBeaconMessage(bad, encoded));
+
+  // callsign 是唯一無法省略的欄位：沒有它就分不出來源。
+  cmt::BeaconMessage nameless{};
+  nameless.battery_percent = 10;
+  TEST_ASSERT_FALSE(cmt::encodeBeaconMessage(nameless, encoded));
+
+  // v1 封包（version=1、無 flags 欄位）必須被拒，不能被解成錯誤的座標。
+  std::vector<std::uint8_t> legacy(13U + 4U, 0U);
+  legacy[0] = 1U;
+  legacy[12] = 4U;
+  TEST_ASSERT_FALSE(cmt::decodeBeaconMessage(legacy, decoded));
 }
 
 // 模擬 codec2_encode() 的輸出：位元組對齊，每幀只有前 kVoiceBitsPerFrame 個
@@ -408,6 +458,7 @@ int main(int, char**) {
   RUN_TEST(test_mesh_router_ttl_and_duplicate_cache);
   RUN_TEST(test_sequence_tracker_reports_only_forward_gaps);
   RUN_TEST(test_beacon_text_and_geo_round_trip);
+  RUN_TEST(test_beacon_without_fix_still_announces_identity);
   RUN_TEST(test_voice_message_round_trip_and_limits);
   return UNITY_END();
 }

@@ -9,8 +9,10 @@
 namespace cmt {
 namespace {
 
-constexpr std::uint8_t kBeaconVersion = 1;
-constexpr std::size_t kBeaconFixedBytes = 13;
+// v2 起加入 flags，讓沒有 GNSS fix 的裝置也能廣播身分與電量。
+constexpr std::uint8_t kBeaconVersion = 2;
+constexpr std::size_t kBeaconFixedBytes = 14;
+constexpr std::uint8_t kBeaconFlagHasFix = 0x01;
 // v2 起改用 Codec2 700C 加跨幀位元打包，並移除可由 codec id 推得的欄位。
 constexpr std::uint8_t kVoiceVersion = 2;
 
@@ -104,25 +106,37 @@ bool decodeTextMessage(const std::vector<std::uint8_t>& input,
 
 bool encodeBeaconMessage(const BeaconMessage& beacon,
                          std::vector<std::uint8_t>& output) {
-  if (!beacon.point.valid ||
-      !isValidCoordinate(beacon.point.latitude, beacon.point.longitude) ||
-      beacon.battery_percent > 100U || beacon.callsign.empty() ||
+  if (beacon.battery_percent > 100U || beacon.callsign.empty() ||
       beacon.callsign.size() > kMaxCallsignBytes) {
     return false;
   }
-  const auto latitude_e7 = static_cast<std::int32_t>(
-      std::lround(beacon.point.latitude * 10000000.0));
-  const auto longitude_e7 = static_cast<std::int32_t>(
-      std::lround(beacon.point.longitude * 10000000.0));
+  // 有 fix 才檢查座標；沒有 fix 時座標欄位一律送零，不廣播虛假的 0/0 位置。
+  const bool has_fix =
+      beacon.point.valid &&
+      isValidCoordinate(beacon.point.latitude, beacon.point.longitude);
+  if (beacon.point.valid && !has_fix) {
+    return false;
+  }
+  const auto latitude_e7 =
+      has_fix ? static_cast<std::int32_t>(
+                    std::lround(beacon.point.latitude * 10000000.0))
+              : 0;
+  const auto longitude_e7 =
+      has_fix ? static_cast<std::int32_t>(
+                    std::lround(beacon.point.longitude * 10000000.0))
+              : 0;
+  const auto altitude = has_fix ? beacon.point.altitude_m
+                                : static_cast<std::int16_t>(0);
 
   output.clear();
   output.reserve(kBeaconFixedBytes + beacon.callsign.size());
   output.push_back(kBeaconVersion);
+  output.push_back(has_fix ? kBeaconFlagHasFix : 0U);
   writeU32(output, static_cast<std::uint32_t>(latitude_e7));
   writeU32(output, static_cast<std::uint32_t>(longitude_e7));
-  output.push_back(static_cast<std::uint8_t>(
-      static_cast<std::uint16_t>(beacon.point.altitude_m) >> 8U));
-  output.push_back(static_cast<std::uint8_t>(beacon.point.altitude_m));
+  output.push_back(
+      static_cast<std::uint8_t>(static_cast<std::uint16_t>(altitude) >> 8U));
+  output.push_back(static_cast<std::uint8_t>(altitude));
   output.push_back(beacon.battery_percent);
   output.push_back(static_cast<std::uint8_t>(beacon.callsign.size()));
   output.insert(output.end(), beacon.callsign.begin(), beacon.callsign.end());
@@ -134,30 +148,46 @@ bool decodeBeaconMessage(const std::vector<std::uint8_t>& input,
   if (input.size() < kBeaconFixedBytes || input[0] != kBeaconVersion) {
     return false;
   }
-  const std::size_t callsign_size = input[12];
+  const std::uint8_t flags = input[1];
+  // 未定義的 flag bit 一律拒收：留給後續版本擴充，且不讓攻擊者塞入被忽略的欄位。
+  if ((flags & static_cast<std::uint8_t>(~kBeaconFlagHasFix)) != 0U) {
+    return false;
+  }
+  const std::size_t callsign_size = input[13];
   if (callsign_size == 0U || callsign_size > kMaxCallsignBytes ||
       input.size() != kBeaconFixedBytes + callsign_size) {
     return false;
   }
-
-  const auto latitude_e7 = static_cast<std::int32_t>(readU32(input.data() + 1));
-  const auto longitude_e7 =
-      static_cast<std::int32_t>(readU32(input.data() + 5));
-  const auto altitude = static_cast<std::int16_t>(
-      (static_cast<std::uint16_t>(input[9]) << 8U) |
-      static_cast<std::uint16_t>(input[10]));
-  if (input[11] > 100U) {
+  if (input[12] > 100U) {
     return false;
   }
 
-  beacon.point.latitude = static_cast<double>(latitude_e7) / 10000000.0;
-  beacon.point.longitude = static_cast<double>(longitude_e7) / 10000000.0;
-  beacon.point.altitude_m = altitude;
-  beacon.point.valid =
-      isValidCoordinate(beacon.point.latitude, beacon.point.longitude);
-  beacon.battery_percent = input[11];
-  beacon.callsign.assign(input.begin() + kBeaconFixedBytes, input.end());
-  return beacon.point.valid;
+  const bool has_fix = (flags & kBeaconFlagHasFix) != 0U;
+  const auto latitude_e7 = static_cast<std::int32_t>(readU32(input.data() + 2));
+  const auto longitude_e7 =
+      static_cast<std::int32_t>(readU32(input.data() + 6));
+  const auto altitude = static_cast<std::int16_t>(
+      (static_cast<std::uint16_t>(input[10]) << 8U) |
+      static_cast<std::uint16_t>(input[11]));
+
+  BeaconMessage decoded{};
+  if (has_fix) {
+    decoded.point.latitude = static_cast<double>(latitude_e7) / 10000000.0;
+    decoded.point.longitude = static_cast<double>(longitude_e7) / 10000000.0;
+    decoded.point.altitude_m = altitude;
+    decoded.point.valid =
+        isValidCoordinate(decoded.point.latitude, decoded.point.longitude);
+    if (!decoded.point.valid) {
+      return false;
+    }
+  } else if (latitude_e7 != 0 || longitude_e7 != 0 || altitude != 0) {
+    // 沒有 fix 就不該帶座標，避免同一則 Beacon 有兩種解讀。
+    return false;
+  }
+  decoded.battery_percent = input[12];
+  decoded.callsign.assign(input.begin() + kBeaconFixedBytes, input.end());
+  beacon = std::move(decoded);
+  return true;
 }
 
 bool encodeVoiceMessage(const VoiceMessage& voice,

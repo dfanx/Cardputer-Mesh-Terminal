@@ -2,6 +2,7 @@
 
 #include "cmt/core/geo.h"
 #include "cmt/core/types.h"
+#include "cmt/platform/gnss_service.h"
 
 #include <cstdint>
 #include <string>
@@ -15,6 +16,8 @@ struct UiPeer {
   std::uint8_t battery_percent = 0;
   std::uint32_t age_seconds = 0;
   float rssi_dbm = 0.0F;
+  // 對方回報自己還沒定位時為 false：名單上看得到人，只是位置未知。
+  bool has_position = false;
 };
 
 struct UiHomeModel {
@@ -27,13 +30,35 @@ struct UiHomeModel {
   bool voice_ready = false;
   std::uint8_t volume_percent = 0;
   std::uint8_t satellites = 0;
+  std::uint8_t satellites_in_view = 0;
+  GnssLink gnss_link = GnssLink::NoData;
   GeoPoint own_position{};
   std::vector<GeoPoint> track;
   std::vector<UiPeer> peers;
   std::size_t selected_peer = 0;
   std::size_t tx_queued = 0;
+  // 尚未確認讀取的來訊數量。大於 0 時主畫面必須明顯提示。
+  std::size_t unread_count = 0;
   // 天線未確認安裝時為 true：發射全面停用，接收仍正常。
   bool tx_inhibited = true;
+};
+
+struct UiHistoryEntry {
+  std::string text;
+  // 有存下可重播的語音音檔。
+  bool has_clip = false;
+};
+
+// 一則待確認的來訊。語音要等使用者按下確認才播放，不會自己出聲。
+struct UiInboxItem {
+  std::string sender;
+  std::string label;
+  std::string text;
+  bool is_voice = false;
+  bool played = false;
+  bool clip_available = false;
+  std::size_t index = 0;
+  std::size_t total = 0;
 };
 
 class TerminalUi {
@@ -54,8 +79,9 @@ class TerminalUi {
                          std::size_t selected);
   void renderTextInput(const std::string& text);
   void renderRecording(float progress);
-  void renderHistory(const std::vector<std::string>& history,
+  void renderHistory(const std::vector<UiHistoryEntry>& history,
                      std::size_t selected);
+  void renderInbox(const UiInboxItem& item);
   void renderNotice(const std::string& title, const std::string& message,
                     std::uint16_t color);
 
@@ -63,7 +89,9 @@ class TerminalUi {
   void header(const char* title, std::uint16_t color);
   void drawTrack(const std::vector<GeoPoint>& track, int x, int y, int width,
                  int height);
-  void drawHomeHints(bool tx_inhibited);
+  void drawHomeHints(const UiHomeModel& model);
+  void drawWrapped(const std::string& text, int x, int y, int line_height,
+                   int max_width_px, int max_lines);
 };
 
 }  // namespace cmt

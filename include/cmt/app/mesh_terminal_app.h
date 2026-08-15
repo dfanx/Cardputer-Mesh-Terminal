@@ -9,6 +9,7 @@
 #include "cmt/platform/device_state.h"
 #include "cmt/platform/gnss_service.h"
 #include "cmt/platform/mbedtls_crypto.h"
+#include "cmt/platform/message_store.h"
 #include "cmt/platform/radio_service.h"
 #include "cmt/platform/storage_service.h"
 #include "cmt/platform/terminal_ui.h"
@@ -34,14 +35,38 @@ class MeshTerminalApp {
     TextInput,
     History,
     Recording,
+    Inbox,
     Notice,
   };
 
   struct PeerState {
     std::uint32_t node_id = 0;
-    BeaconMessage beacon{};
+    // 任何通過認證的封包都會建立 / 更新隊友，不必等到 Beacon。callsign 要等對方的
+    // Beacon 才有，之前先用 node id 顯示。
+    std::string callsign;
+    GeoPoint position{};
+    std::uint8_t battery_percent = 0;
+    bool had_beacon = false;
     std::uint32_t last_seen_ms = 0;
     float rssi_dbm = 0.0F;
+  };
+
+  // 一則等待使用者確認的來訊。語音在確認之前不會播放。
+  struct InboxItem {
+    MessageType type = MessageType::Text;
+    std::uint32_t source_id = 0;
+    std::string sender;
+    std::string label;
+    std::string text;
+    std::uint32_t clip_id = 0;
+    // 只有在音檔存不進 logfs 時才用到：這一則至少還能聽一次，關掉就沒了。
+    std::vector<std::uint8_t> frames;
+    bool played = false;
+  };
+
+  struct HistoryEntry {
+    std::string text;
+    std::uint32_t clip_id = 0;
   };
 
   void handleInput(std::uint32_t now_ms);
@@ -56,6 +81,7 @@ class MeshTerminalApp {
   void handleMenuInput();
   void handleTextInput();
   void handleHistoryInput();
+  void handleInboxInput();
   void handleNoticeInput();
   void handleRadio(std::uint32_t now_ms);
   void handleDecodedMessage(const ReassemblyResult& result, float rssi_dbm,
@@ -73,16 +99,44 @@ class MeshTerminalApp {
   // 成立時回傳 nullptr（代表失敗發生在封裝或佇列，不是前置條件）。
   const char* txBlockReason() const;
   PacketHeader makeBaseHeader(MessageType type);
-  void addHistory(const std::string& entry);
+
+  // 建立或更新隊友紀錄，回傳該筆的參考。
+  PeerState& touchPeer(std::uint32_t node_id, float rssi_dbm,
+                       std::uint32_t now_ms);
+  std::string peerName(std::uint32_t node_id) const;
+  // 收到新隊友時把自己的 Beacon 提前，讓雙方位置盡快對上。
+  void expediteBeacon(std::uint32_t now_ms);
+
+  // 只進 RAM 的顯示用紀錄，給 store 尚未就緒或不值得落地的訊息。
+  void addHistory(const std::string& entry, std::uint32_t clip_id = 0);
+  // 同時進 RAM 與 logfs 的系統事件（天線、隊友上線、漏訊）。
+  void recordSystem(const std::string& entry);
+  // 寫入持久紀錄並同步 RAM 內的顯示用清單。
+  void recordText(LogKind kind, bool outgoing, const std::string& sender,
+                  const std::string& display_text, const std::string& body,
+                  std::uint32_t source_id);
+  // 回傳可重播的 clip id，0 表示沒能存下音檔（歷史紀錄仍會寫入）。
+  std::uint32_t recordVoice(bool outgoing, const std::string& sender,
+                            const std::string& display_text,
+                            const std::vector<std::uint8_t>& frames,
+                            std::uint32_t source_id);
+  void loadHistoryFromStore();
+  void enqueueInbox(InboxItem item);
+  bool playClip(std::uint32_t clip_id);
+  bool playInboxVoice(const InboxItem& item);
+
   void showNotice(const std::string& title, const std::string& message,
                   std::uint16_t color);
   UiHomeModel buildHomeModel(std::uint32_t now_ms) const;
+  std::vector<UiHistoryEntry> buildHistoryModel() const;
+  UiInboxItem buildInboxModel() const;
 
   TerminalUi ui_;
   DeviceState device_state_;
   NonceGenerator nonce_generator_;
   GnssService gnss_;
   StorageService storage_;
+  MessageStore store_;
   RadioService radio_;
   AudioService audio_;
   MbedTlsCrypto crypto_;
@@ -98,7 +152,8 @@ class MeshTerminalApp {
   std::string pairing_error_;
   std::string text_input_;
   std::vector<PeerState> peers_;
-  std::vector<std::string> history_;
+  std::vector<HistoryEntry> history_;
+  std::vector<InboxItem> inbox_;
   std::size_t menu_selected_ = 0;
   std::size_t peer_selected_ = 0;
   std::size_t history_selected_ = 0;
