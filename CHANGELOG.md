@@ -27,6 +27,7 @@
 - 隊友名單改由任何通過認證的封包建立，不再只靠 Beacon；收到沒見過的隊友時把自己的下一次 Beacon 提前 4–10 s，位置不必等滿十分鐘才對上。主畫面顯示隊友代號、序號與「多久前聽到」，並分辨「對方無定位」與「本機無定位」。
 - 收到語音改為**不自動播放**：先存檔並發提示音，使用者按 Enter 才播放，之後可從歷史重播（ADR-009）。
 - 分割表由 `default_8MB.csv` 改為 `partitions/cmt-adv-8mb.csv`，移除未使用的 OTA 第二 app 槽；app 分割由 3.3 MB 縮為 3 MB（目前用量 1.19 MB）。
+- `deploy\flash-dev.cmd`／`flash-dev.ps1` 移除 `-EraseAll` 選用旗標，改為每次都先完整抹除再寫入。分割表已綁定固定 offset 的 `logfs`，不先抹除可能在分割表變動後留下與新版面不一致的殘留內容；完整抹除會清掉 NVS，使用者代號與配對狀態需在下次開機重新輸入。
 - 選單、歷史與主畫面的方向鍵與 `Esc` 改為單按即可，不再需要 `Fn` 組合鍵。自由訊息輸入頁維持 `Fn` + `Esc`，因為該頁的 `` ` `` 是可輸入字元。
 - 群組 PIN 輸入改為明碼顯示，不再遮成 `*`。4 位 PIN 的安全目標只有群組辨識與基本內容遮蔽，遮蔽擋不住實際威脅，卻讓使用者看不出按錯哪一位。
 - README 新增「主畫面欄位對照」表，說明標題列 `B`＝電量、`L`＝音量、`G`＝群組 id，以及右欄 `R`/`S`/`V`/`Q` 等縮寫。
@@ -48,8 +49,8 @@
 ### Verification status
 
 - **本次修正（Beacon v2、來訊提示、logfs 歷史、喇叭電源、GNSS 診斷）僅通過 native core tests（10/10）與 `cardputer-adv` clean build，尚未在實機驗證。** 需要兩台裝置實測的項目：隊友出現在名單、提示音與逐則確認、語音重播、喇叭底噪消失、GNSS 狀態指示是否正確反映室內/室外。
-- 分割表已變更，升級必須整片抹除後燒錄（`deploy\flash-dev.cmd -EraseAll`），否則 `logfs` 不存在、歷史會降級為 RAM-only。
-- 已在單機實測：建置、燒錄（COM3、hash verified）與開機流程；離螢幕緩衝配置成功，畫面閃爍經實機確認已消除。
+- 分割表已變更，升級必須整片抹除後燒錄；`deploy\flash-dev.cmd`／`flash-dev.ps1` 已改為每次都先完整抹除再寫入（不再是 `-EraseAll` 選用旗標），避免舊分割表殘留造成 `logfs` 不存在或內容不一致。
+- 已在單機實測：完整抹除後建置、燒錄（COM3、hash verified）與開機流程；離螢幕緩衝配置成功，畫面閃爍經實機確認已消除。
 - **語音錄音鏈路已在實機驗證**：`codec2_create(CODEC2_MODE_700C)` 配置成功（狀態列 `V:Y`），未重演 MODE_1300 的 loopTask 堆疊溢位；連續兩次 PTT 分別擷取 46 與 55 幀（後者錄滿 2.2 秒緩衝上限），`M5Cardputer.Mic.record()` 失敗 0 次，麥克風／喇叭資源切換正常。
 - 語音編碼與 wire format 已用真實錄音（2.82 秒人聲）在主機端驗證：走過 `encodeVoiceMessage()`／`decodeVoiceMessage()` 後位元流完全一致，2.2 秒段落為 196 bytes、單一 fragment。
 - **未驗證：所有發射與接收鏈路**（文字、罐頭訊息、Beacon、語音、Mesh 中繼）。測試機沒有 LoRa cap 模組，`radio_.begin()` 失敗、狀態列顯示 `R:N`，`sendPayload()` 的前置檢查一律擋下。GNSS 同樣來自該 cap，`GPS 0`。

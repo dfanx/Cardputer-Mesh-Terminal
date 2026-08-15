@@ -1,7 +1,6 @@
 [CmdletBinding()]
 param(
     [string]$Port,
-    [switch]$EraseAll,
     [switch]$Monitor
 )
 
@@ -59,12 +58,16 @@ if ($Port -notmatch '^COM\d+$') {
 
 Write-Host "Cardputer Mesh Terminal - build and flash from source" -ForegroundColor Cyan
 Write-Host "Target: $Port"
-Write-Host 'This overwrites the bootloader, partition table, and application.' -ForegroundColor Yellow
+Write-Host 'This does a full chip erase, then writes the bootloader, partition table, and application.' -ForegroundColor Yellow
+Write-Host 'The erase wipes NVS: saved callsign and pairing state are lost, not just the app image.' -ForegroundColor Yellow
 
-if ($EraseAll) {
-    & $pio run -e cardputer-adv -t erase --upload-port $Port
-    if ($LASTEXITCODE -ne 0) { throw "Flash erase failed, exit code $LASTEXITCODE" }
-}
+# Always a full erase before flashing: the logfs partition (ADR-008) sits at a
+# fixed offset baked into the current partition table, so a plain overwrite
+# can leave stale bytes from a differently-laid-out prior flash instead of a
+# clean filesystem. A full erase is the only way this script can guarantee
+# what's on the chip afterward matches what was just built.
+& $pio run -e cardputer-adv -t erase --upload-port $Port
+if ($LASTEXITCODE -ne 0) { throw "Flash erase failed, exit code $LASTEXITCODE" }
 
 & $pio run -e cardputer-adv -t upload --upload-port $Port
 if ($LASTEXITCODE -ne 0) {

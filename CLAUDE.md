@@ -10,7 +10,7 @@ M5Stack Cardputer Adv + Cap LoRa-1262/GNSS 的山區離網文字、定位與短�
 - Test full: `.\tools\test-native.cmd`
 - Lint / static check: `.\tools\pio.cmd check -e cardputer-adv`
 - Build: `.\tools\pio.cmd run -e cardputer-adv`
-- Flash（從原始碼建置並燒錄，自動選 COM 埠）: `.\deploy\flash-dev.cmd`；可加 `-Port COM5`、`-EraseAll`、`-Monitor`
+- Flash（從原始碼建置並燒錄，自動選 COM 埠，每次都會先完整抹除再寫入）: `.\deploy\flash-dev.cmd`；可加 `-Port COM5`、`-Monitor`
 
 ## Invariants
 
